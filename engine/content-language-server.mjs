@@ -4,12 +4,17 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import YAML from "yaml";
 import { parseAddress, renderAddress } from "@heroiclands/package-build/engine/address";
 import { addressPositions } from "@heroiclands/package-build/engine/note-addresses";
 import { parseWikilink, WIKILINK } from "@heroiclands/package-build/engine/wikilink-syntax";
-import { loadPackConfig } from "@heroiclands/package-build/engine/pack-config";
+import {
+    CONFIG_FILENAMES,
+    configFromData,
+    loadPackConfig,
+} from "@heroiclands/package-build/engine/pack-config";
 import { noteFile } from "@heroiclands/package-build/engine/index-records";
 import { NOTE_VOCABULARY } from "@heroiclands/package-build/engine/note-vocabulary";
 import {
@@ -21,6 +26,22 @@ import { matchAllOutsideCode } from "@heroiclands/package-build/engine/code-fenc
 import { embedsIn, EMBED_DEFAULT_TYPE } from "@heroiclands/package-build/engine/content-embeds";
 
 const EMPTY_RANGE = { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } };
+const require = createRequire(import.meta.url);
+
+/** Load an explicitly selected project's configuration with this server's toolchain. */
+function loadForeignConfig(root) {
+    const files = CONFIG_FILENAMES.map((name) => path.join(root, name)).filter((file) =>
+        fs.existsSync(file),
+    );
+    if (files.length !== 1)
+        throw new Error(root + " must contain exactly one package-build configuration");
+    const file = files[0];
+    if (file.endsWith(".mjs")) {
+        const module = require(file);
+        return module.default ?? module;
+    }
+    return configFromData(YAML.parse(fs.readFileSync(file, "utf8")), file);
+}
 
 /** Return an LSP position for a UTF-16 offset in TEXT. */
 function positionAt(text, offset) {
@@ -52,8 +73,13 @@ function noteName(record) {
 
 /** An index read from the package's configured content tree. */
 export class ContentWorkspace {
-    constructor(config = loadPackConfig(), { cacheBase, onStatus = () => {} } = {}) {
+    constructor(
+        config = loadPackConfig(),
+        { cacheBase, onStatus = () => {}, loadProjectConfig = loadForeignConfig } = {},
+    ) {
         this.config = config;
+        this.cacheBase = cacheBase;
+        this.loadProjectConfig = loadProjectConfig;
         this.contentRoot = config.paths.content;
         this.cacheDirectory = languageIndexDirectory(config, cacheBase);
         this.indexFile = path.join(this.cacheDirectory, "metadata.jsonl");
@@ -66,6 +92,123 @@ export class ContentWorkspace {
         this.byFile = new Map();
         this.types = new Set(Object.keys(NOTE_VOCABULARY));
         this.documents = new Map();
+        this.foreignRoots = [];
+        this.foreign = new Map();
+    }
+
+    /** Select foreign roots explicitly; a cache directory cannot add a project. */
+    configureForeignRoots(roots = []) {
+        if (!Array.isArray(roots) || roots.some((root) => typeof root !== "string"))
+            throw new Error("initializationOptions.foreignRoots must be an array of paths");
+        const ownRoot = fs.realpathSync(this.config.rootDir);
+        this.foreignRoots = [
+            ...new Set(
+                roots.map((root) => {
+                    const absolute = path.resolve(root);
+                    return fs.existsSync(absolute) ? fs.realpathSync(absolute) : absolute;
+                }),
+            ),
+        ].filter((root) => root !== ownRoot);
+        for (const [root, project] of this.foreign)
+            if (!this.foreignRoots.includes(root)) {
+                project.close();
+                this.foreign.delete(root);
+            }
+    }
+
+    foreignWorkspace(root) {
+        if (this.foreign.has(root)) return this.foreign.get(root);
+        const config = this.loadProjectConfig(root);
+        const project = new ContentWorkspace(config, {
+            cacheBase: this.cacheBase,
+            onStatus: (message) => {
+                if (message) this.onStatus(config.contentPackage + ": " + message);
+            },
+            loadProjectConfig: this.loadProjectConfig,
+        });
+        project.documents = this.documents;
+        this.foreign.set(root, project);
+        return project;
+    }
+
+    /** Return usable indexes, reporting one failed root without hiding the others. */
+    indexedWorkspaces(includeForeign = false) {
+        this.requireIndex();
+        const projects = [this];
+        if (includeForeign)
+            for (const root of this.foreignRoots) {
+                try {
+                    const project = this.foreignWorkspace(root);
+                    project.start(true);
+                    project.requireIndex();
+                    projects.push(project);
+                } catch (error) {
+                    this.onStatus("Foreign content project " + root + ": " + error.message);
+                }
+            }
+        return projects;
+    }
+
+    /** Find every indexed owner of a written Address for navigation. */
+    resolveCandidates(value, defaults = {}, projects = [this]) {
+        const packages = new Set(projects.map((project) => project.config.contentPackage));
+        const found = [];
+        for (const project of projects) {
+            const tuple = parseAddress(value, {
+                package: project.config.contentPackage,
+                system: "none",
+                types: project.types,
+                packages,
+                ...defaults,
+            });
+            if (tuple.reason) continue;
+            const record = project.byAddress.get(renderAddress(tuple));
+            if (record) found.push({ record, project });
+        }
+        return found;
+    }
+
+    /** Locate the workspace that owns an open source document. */
+    sourceWorkspace(uri, projects) {
+        const file = fileURLToPath(uri);
+        return (
+            projects.find((project) => {
+                const relative = path.relative(project.contentRoot, file);
+                return (
+                    relative &&
+                    !path.isAbsolute(relative) &&
+                    relative !== ".." &&
+                    !relative.startsWith(".." + path.sep)
+                );
+            }) ?? this
+        );
+    }
+
+    scheduleRebuildForUri(uri) {
+        const file = fileURLToPath(uri);
+        const inside = (directory) => {
+            const relative = path.relative(directory, file);
+            return (
+                relative &&
+                !path.isAbsolute(relative) &&
+                relative !== ".." &&
+                !relative.startsWith(".." + path.sep)
+            );
+        };
+        if (inside(this.contentRoot) || inside(this.config.paths.assets)) {
+            this.scheduleRebuild();
+            return;
+        }
+        for (const root of this.foreignRoots) {
+            if (!inside(root)) continue;
+            try {
+                const project = this.foreignWorkspace(root);
+                if (inside(project.contentRoot) || inside(project.config.paths.assets))
+                    project.scheduleRebuild();
+            } catch (error) {
+                this.onStatus("Foreign content project " + root + ": " + error.message);
+            }
+        }
     }
 
     refresh() {
@@ -126,9 +269,15 @@ export class ContentWorkspace {
         }
     }
 
-    start() {
+    start(acceptCompleteCache = false) {
         if (this.started) return;
         this.started = true;
+        if (acceptCompleteCache)
+            try {
+                if (this.refresh()) return;
+            } catch {
+                // A corrupt or incompatible snapshot is rebuilt from saved notes.
+            }
         this.rebuild();
     }
 
@@ -143,6 +292,7 @@ export class ContentWorkspace {
     close() {
         if (this.rebuildTimer) clearTimeout(this.rebuildTimer);
         this.rebuildTimer = null;
+        for (const project of this.foreign.values()) project.close();
     }
 
     requireIndex() {
@@ -175,31 +325,39 @@ export class ContentWorkspace {
     }
 
     /** Resolve a written Address using the same tuple grammar as the build. */
-    resolve(value, defaults = {}) {
+    resolve(value, defaults = {}, projects = [this]) {
         const tuple = parseAddress(value, {
             package: this.config.contentPackage,
             system: "none",
-            types: this.types,
-            packages: new Set([this.config.contentPackage]),
+            types: new Set(projects.flatMap((project) => [...project.types])),
+            packages: new Set(projects.map((project) => project.config.contentPackage)),
             ...defaults,
         });
         if (tuple.reason) return null;
-        return this.byAddress.get(renderAddress(tuple)) ?? null;
+        for (const project of projects)
+            if (project.config.contentPackage === tuple.package) {
+                const record = project.byAddress.get(renderAddress(tuple));
+                if (record) return record;
+            }
+        return null;
     }
 
     /** Link and declared frontmatter targets, with exact source ranges. */
-    referencesInText(text, file) {
+    referencesInText(text, file, projects = [this], includeFrontmatter = true) {
         const found = [];
         const bodyStart = text.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/)?.[0].length ?? 0;
         const linkText = text.slice(bodyStart);
         for (const match of matchAllOutsideCode(linkText, new RegExp(WIKILINK.source, "g"))) {
             const parsed = parseWikilink(match[1]);
-            const record = parsed.target ? this.resolve(parsed.target) : this.byFile.get(file);
+            const record =
+                parsed.target ? this.resolve(parsed.target, {}, projects) : this.byFile.get(file);
             if (!record) continue;
             const start = bodyStart + match.index + (parsed.target ? 2 : 3);
             found.push({
                 record,
                 anchor: parsed.anchor,
+                written: parsed.target,
+                defaults: {},
                 location: location(
                     file,
                     text,
@@ -209,16 +367,19 @@ export class ContentWorkspace {
             });
         }
         for (const embed of embedsIn(linkText)) {
-            const record = this.resolve(embed.written, { type: EMBED_DEFAULT_TYPE });
+            const defaults = { type: EMBED_DEFAULT_TYPE };
+            const record = this.resolve(embed.written, defaults, projects);
             if (!record) continue;
             const start = bodyStart + embed.index + 3;
             found.push({
                 record,
                 anchor: "",
+                written: embed.written,
+                defaults,
                 location: location(file, text, start, start + embed.written.length),
             });
         }
-        if (!bodyStart) return found;
+        if (!bodyStart || !includeFrontmatter) return found;
         const yamlStart = text.indexOf("\n") + 1;
         const yamlText = text.slice(yamlStart, bodyStart).replace(/\r?\n---(?:\r?\n)?$/, "");
         let document;
@@ -249,15 +410,18 @@ export class ContentWorkspace {
             }
             const scalar = (part, value) => {
                 if (!YAML.isScalar(part) || typeof value !== "string" || !part.range) return;
-                const record = this.resolve(value, {
+                const defaults = {
                     system: position.system ?? "none",
                     type: position.type,
-                });
+                };
+                const record = this.resolve(value, defaults, projects);
                 if (!record) return;
                 const start = yamlStart + part.range[0];
                 found.push({
                     record,
                     anchor: "",
+                    written: value,
+                    defaults,
                     location: location(file, text, start, yamlStart + part.range[1]),
                 });
             };
@@ -276,49 +440,75 @@ export class ContentWorkspace {
         return found;
     }
 
-    targetAt(uri, position) {
+    targetAt(uri, position, projects = [this]) {
         const text = this.text(uri);
         if (text == null) return null;
         const offset = offsetAt(text, position);
         if (offset < 0) return null;
         const file = fileURLToPath(uri);
-        const reference = this.referencesInText(text, file).find(({ location: source }) => {
-            const start = offsetAt(text, source.range.start);
-            const end = offsetAt(text, source.range.end);
-            return start <= offset && offset <= end;
-        });
-        if (reference) return { record: reference.record, anchor: reference.anchor };
+        const reference = this.referencesInText(text, file, projects).find(
+            ({ location: source }) => {
+                const start = offsetAt(text, source.range.start);
+                const end = offsetAt(text, source.range.end);
+                return start <= offset && offset <= end;
+            },
+        );
+        if (reference) return reference;
         const own = this.byFile.get(file);
         if (own && /^shortcode:\s*/.test(text.split("\n")[position.line] ?? ""))
-            return { record: own, anchor: "" };
-        const start = text.slice(0, offset).search(/[A-Za-z0-9./]+$/);
+            return { record: own, anchor: "", written: own.address?.canonical, defaults: {} };
+        const start = text.slice(0, offset).search(/[A-Za-z0-9./-]+$/);
         if (start < 0) return null;
-        const end = offset + (text.slice(offset).match(/^[A-Za-z0-9./]+/)?.[0].length ?? 0);
-        const record = this.resolve(text.slice(start, end));
-        return record ? { record, anchor: "" } : null;
+        const end = offset + (text.slice(offset).match(/^[A-Za-z0-9./-]+/)?.[0].length ?? 0);
+        const written = text.slice(start, end);
+        const record = this.resolve(written, {}, projects);
+        return { record, anchor: "", written, defaults: {} };
     }
 
     definition(uri, position) {
-        this.requireIndex();
-        const target = this.targetAt(uri, position);
+        const projects = this.indexedWorkspaces(true);
+        const source = this.sourceWorkspace(uri, projects);
+        const target = source.targetAt(uri, position, projects);
         if (!target) return null;
-        const { record, anchor } = target;
-        const file = this.fileFor(record);
-        if (!file) return null;
-        if (record.asset) return { uri: pathToFileURL(file).href, range: EMPTY_RANGE };
-        const line =
-            anchor ?
-                record.anchors?.find((entry) => entry.slug.toLowerCase() === anchor.toLowerCase())
-                    ?.line
-            :   null;
-        if (anchor && !line) return null;
-        const targetText = fs.readFileSync(file, "utf8");
-        const offset = line ? offsetAt(targetText, { line: line - 1, character: 0 }) : 0;
-        return location(file, targetText, offset, offset);
+        const candidates =
+            target.written ?
+                source.resolveCandidates(target.written, target.defaults, projects)
+            :   [{ record: target.record, project: source }];
+        const locations = [];
+        for (const { record, project } of candidates) {
+            const file = project.fileFor(record);
+            if (!file) continue;
+            if (record.asset) {
+                locations.push({ uri: pathToFileURL(file).href, range: EMPTY_RANGE });
+                continue;
+            }
+            const line =
+                target.anchor ?
+                    record.anchors?.find(
+                        (entry) => entry.slug.toLowerCase() === target.anchor.toLowerCase(),
+                    )?.line
+                :   null;
+            if (target.anchor && !line) continue;
+            const targetText = fs.readFileSync(file, "utf8");
+            const offset = line ? offsetAt(targetText, { line: line - 1, character: 0 }) : 0;
+            locations.push(location(file, targetText, offset, offset));
+        }
+        return (
+            locations.length === 1 ? locations[0]
+            : locations.length ? locations
+            : null
+        );
     }
 
     symbols(query) {
-        this.requireIndex();
+        const includeForeign = /^all:/i.test(query);
+        const search = includeForeign ? query.slice(4) : query;
+        return this.indexedWorkspaces(includeForeign).flatMap((project) =>
+            project.symbolMatches(search),
+        );
+    }
+
+    symbolMatches(query) {
         const tag = /^tag:(.*)$/i.exec(query);
         const needle = (tag ? tag[1] : query).trim().toLowerCase();
         const found = new Map();
@@ -345,7 +535,7 @@ export class ContentWorkspace {
             found.set(file, {
                 name: String(noteName(record)),
                 kind: 1,
-                containerName: `${record.address?.slug ?? [record.type, record.shortcode].filter(Boolean).join(" ")} · ${tag ? `tag: ${match}` : match}`,
+                containerName: `${record.package} · ${record.address?.slug ?? [record.type, record.shortcode].filter(Boolean).join(" ")} · ${tag ? `tag: ${match}` : match}`,
                 location: { uri: pathToFileURL(file).href, range: EMPTY_RANGE },
             });
         }
@@ -353,29 +543,57 @@ export class ContentWorkspace {
     }
 
     references(uri, position) {
-        this.requireIndex();
-        const target = this.targetAt(uri, position)?.record;
-        if (!target?.address?.canonical) return [];
+        const projects = this.indexedWorkspaces(true);
+        const source = this.sourceWorkspace(uri, projects);
+        const target = source.targetAt(uri, position, projects);
+        if (!target) return [];
+        const candidates =
+            target.record ?
+                [target.record]
+            :   source
+                    .resolveCandidates(target.written, target.defaults, projects)
+                    .map(({ record }) => record);
+        const addresses = new Set(
+            candidates.map((record) => record.address?.canonical).filter(Boolean),
+        );
+        if (!addresses.size) return [];
         const locations = [];
-        const needle = target.shortcode.toLowerCase();
-        const visit = (directory) => {
+        const needles = candidates.map((record) => record.shortcode.toLowerCase());
+        const visit = (project, directory, frontmatterCandidates) => {
             for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
                 if (entry.name.startsWith(".")) continue;
                 const file = path.join(directory, entry.name);
                 if (entry.isDirectory()) {
-                    visit(file);
+                    visit(project, file, frontmatterCandidates);
                 } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
                     const savedText = fs.readFileSync(file, "utf8");
-                    if (!savedText.toLowerCase().includes(needle)) continue;
-                    const text = this.documents.get(pathToFileURL(file).href) ?? savedText;
-                    for (const reference of this.referencesInText(text, file)) {
-                        if (reference.record.address?.canonical === target.address.canonical)
+                    if (!needles.some((needle) => savedText.toLowerCase().includes(needle)))
+                        continue;
+                    for (const reference of project.referencesInText(
+                        savedText,
+                        file,
+                        projects,
+                        frontmatterCandidates.has(file),
+                    )) {
+                        if (addresses.has(reference.record.address?.canonical))
                             locations.push(reference.location);
                     }
                 }
             }
         };
-        visit(this.contentRoot);
+        for (const project of projects) {
+            const frontmatterCandidates = new Set(
+                project.records
+                    .filter((record) =>
+                        needles.some((needle) =>
+                            JSON.stringify(record).toLowerCase().includes(needle),
+                        ),
+                    )
+                    .filter((record) => record.file?.path)
+                    .map((record) => noteFile(project.contentRoot, record)),
+            );
+            visit(project, project.contentRoot, frontmatterCandidates);
+        }
         return locations;
     }
 }
@@ -385,6 +603,7 @@ export function respond(workspace, message) {
     const { method, params = {} } = message;
     switch (method) {
         case "initialize":
+            workspace.configureForeignRoots(params.initializationOptions?.foreignRoots ?? []);
             workspace.start();
             return {
                 capabilities: {
@@ -405,6 +624,10 @@ export function respond(workspace, message) {
             };
         case "shutdown":
             return null;
+        case "workspace/didChangeConfiguration":
+            if (params.settings?.heroiclands?.foreignRoots)
+                workspace.configureForeignRoots(params.settings.heroiclands.foreignRoots);
+            return undefined;
         case "textDocument/didOpen":
             workspace.documents.set(params.textDocument.uri, params.textDocument.text);
             return undefined;
@@ -426,12 +649,19 @@ export function respond(workspace, message) {
             workspace.documents.delete(params.textDocument.uri);
             return undefined;
         case "textDocument/didSave":
+            workspace.scheduleRebuildForUri(params.textDocument.uri);
+            return undefined;
         case "workspace/didChangeWatchedFiles":
         case "workspace/didCreateFiles":
         case "workspace/didRenameFiles":
-        case "workspace/didDeleteFiles":
-            workspace.scheduleRebuild();
+        case "workspace/didDeleteFiles": {
+            const files = params.changes ?? params.files ?? [];
+            if (!files.length) workspace.scheduleRebuild();
+            for (const item of files)
+                for (const uri of [item.uri, item.oldUri, item.newUri].filter(Boolean))
+                    workspace.scheduleRebuildForUri(uri);
             return undefined;
+        }
         case "textDocument/definition":
             return workspace.definition(params.textDocument.uri, params.position);
         case "textDocument/references":

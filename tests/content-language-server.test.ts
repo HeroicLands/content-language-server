@@ -18,6 +18,7 @@ import { generatorVersion } from "../engine/content-language-index.mjs";
 
 let root: string;
 let workspace: ContentWorkspace;
+let foreignDirectories: string[];
 
 function note(file: string, text: string): string {
     const full = path.join(root, "assets/content", file);
@@ -26,19 +27,23 @@ function note(file: string, text: string): string {
 }
 
 function index(records: object[]): void {
-    fs.mkdirSync(workspace.cacheDirectory, { recursive: true });
+    indexFor(workspace, records);
+}
+
+function indexFor(project: ContentWorkspace, records: object[]): void {
+    fs.mkdirSync(project.cacheDirectory, { recursive: true });
     const text = records.map((record) => JSON.stringify(record)).join("\n") + "\n";
-    fs.writeFileSync(workspace.indexFile, text);
+    fs.writeFileSync(project.indexFile, text);
     fs.writeFileSync(
-        path.join(workspace.cacheDirectory, "metadata.json"),
+        path.join(project.cacheDirectory, "metadata.json"),
         JSON.stringify({
-            package: "test",
+            package: project.config.contentPackage,
             generatorVersion,
             sha256: crypto.createHash("sha256").update(text).digest("hex"),
         }),
     );
-    workspace.started = true;
-    workspace.indexState = "";
+    project.started = true;
+    project.indexState = "";
 }
 
 const alpha = {
@@ -56,6 +61,7 @@ const alpha = {
 
 beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "heroiclands-lsp-"));
+    foreignDirectories = [];
     fs.mkdirSync(path.join(root, "assets/content"), { recursive: true });
     fs.mkdirSync(path.join(root, "build/content-index"), { recursive: true });
     workspace = new ContentWorkspace(
@@ -78,6 +84,8 @@ afterEach(() => {
     workspace.close();
     vi.useRealTimers();
     fs.rmSync(root, { recursive: true, force: true });
+    for (const directory of foreignDirectories)
+        fs.rmSync(directory, { recursive: true, force: true });
 });
 
 function savedLore(file: string, shortcode: string, name: string): string {
@@ -87,7 +95,281 @@ function savedLore(file: string, shortcode: string, name: string): string {
     );
 }
 
+function foreignProject(contentPackage = "other") {
+    const directory = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), "heroiclands-foreign-")),
+    );
+    foreignDirectories.push(directory);
+    fs.mkdirSync(path.join(directory, "assets/content"), { recursive: true });
+    const config = {
+        rootDir: directory,
+        contentPackage,
+        packs: [],
+        skipDirectories: [],
+        paths: {
+            content: path.join(directory, "assets/content"),
+            assets: path.join(directory, "assets"),
+            contentIndex: path.join(directory, "build/content-index"),
+        },
+    };
+    workspace.loadProjectConfig = (selected: string) => {
+        if (selected !== directory) throw new Error("No content configuration at " + selected);
+        return config;
+    };
+    const save = (file: string, text: string) => {
+        const full = path.join(config.paths.content, file);
+        fs.writeFileSync(full, text);
+        return pathToFileURL(full).href;
+    };
+    return { directory, config, save };
+}
+
 describe("content language server", () => {
+    it("searches foreign indexes only with an explicit symbol scope", () => {
+        savedLore("Alpha.md", "alpha", "Shared Name");
+        const foreign = foreignProject();
+        const foreignUri = foreign.save(
+            "Beta.md",
+            "---\ntype: lore\nshortcode: beta\nname:\n  full: Shared Name\n---\n",
+        );
+        respond(workspace, {
+            method: "initialize",
+            params: { initializationOptions: { foreignRoots: [foreign.directory] } },
+        });
+        expect(workspace.symbols("Shared Name")).toHaveLength(1);
+        const foreignWorkspace = workspace.foreignWorkspace(foreign.directory);
+        expect(fs.existsSync(foreignWorkspace.indexFile)).toBe(false);
+        const symbols = workspace.symbols("all:Shared Name");
+        expect(symbols).toHaveLength(2);
+        expect(symbols.map((symbol) => symbol.containerName)).toEqual([
+            expect.stringContaining("test ·"),
+            expect.stringContaining("other ·"),
+        ]);
+        expect(symbols[1].location.uri).toBe(foreignUri);
+        expect(fs.existsSync(foreignWorkspace.indexFile)).toBe(true);
+        respond(workspace, {
+            method: "workspace/didChangeConfiguration",
+            params: { settings: { heroiclands: { foreignRoots: [] } } },
+        });
+        expect(workspace.symbols("all:Shared Name")).toHaveLength(1);
+    });
+
+    it("opens foreign canonical notes and assets from their owning roots", () => {
+        const sourceText = "See [[other-none-lore-beta|Beta]] and ![[other-none-icon-sun|Sun]].\n";
+        const source = note("Source.md", sourceText);
+        savedLore("Alpha.md", "alpha", "Local");
+        const foreign = foreignProject();
+        const target = foreign.save(
+            "Beta.md",
+            "---\ntype: lore\nshortcode: beta\nname:\n  full: Beta\n---\n",
+        );
+        const asset = path.join(foreign.directory, "assets/icons/sun.webp");
+        fs.mkdirSync(path.dirname(asset), { recursive: true });
+        fs.writeFileSync(asset, "image bytes");
+        foreign.save("Icon.md", "---\ntype: icon\nshortcode: sun\n---\n");
+        respond(workspace, {
+            method: "initialize",
+            params: { initializationOptions: { foreignRoots: [foreign.directory] } },
+        });
+        indexFor(workspace.foreignWorkspace(foreign.directory), [
+            {
+                ...alpha,
+                package: "other",
+                shortcode: "beta",
+                name: { full: "Beta" },
+                address: { slug: "lore-beta", canonical: "other-none-lore-beta" },
+                file: { path: "Beta.md" },
+            },
+            {
+                package: "other",
+                type: "icon",
+                shortcode: "sun",
+                address: { slug: "icon-sun", canonical: "other-none-icon-sun" },
+                asset: { path: "icons/sun.webp" },
+            },
+        ]);
+        expect(workspace.definition(source, { line: 0, character: 16 })?.uri).toBe(target);
+        expect(
+            workspace.definition(source, {
+                line: 0,
+                character: sourceText.indexOf("other-none-icon-sun") + 5,
+            })?.uri,
+        ).toBe(pathToFileURL(asset).href);
+    });
+
+    it("returns both owning locations for an ambiguous bare Address", () => {
+        const source = note("Source.md", "See [[lore-alpha|Shared]].\n");
+        savedLore("Alpha.md", "alpha", "Local");
+        const foreign = foreignProject();
+        foreign.save(
+            "Alpha.md",
+            "---\ntype: lore\nshortcode: alpha\nname:\n  full: Foreign\n---\n",
+        );
+        respond(workspace, {
+            method: "initialize",
+            params: { initializationOptions: { foreignRoots: [foreign.directory] } },
+        });
+        index([alpha]);
+        indexFor(workspace.foreignWorkspace(foreign.directory), [
+            {
+                ...alpha,
+                package: "other",
+                file: { path: "Alpha.md" },
+                address: {
+                    slug: "lore-alpha",
+                    canonical: "other-none-lore-alpha",
+                },
+            },
+        ]);
+        const result = workspace.definition(source, { line: 0, character: 10 });
+        expect(Array.isArray(result)).toBe(true);
+        expect(result).toHaveLength(2);
+        expect(result.map((entry: any) => entry.uri)).toEqual([
+            expect.stringContaining(root),
+            expect.stringContaining(foreign.directory),
+        ]);
+    });
+
+    it("finds foreign body and indexed frontmatter references with saved ranges", () => {
+        const target = note("Guild.md", "---\ntype: place\nshortcode: guild\n---\n");
+        const foreign = foreignProject();
+        const source = foreign.save(
+            "Route.md",
+            "---\ntype: place\nshortcode: route\ndata:\n  routes:\n    - to: test-none-place-guild\n---\nSee [[test-none-place-guild|Guild]].\n",
+        );
+        respond(workspace, {
+            method: "initialize",
+            params: { initializationOptions: { foreignRoots: [foreign.directory] } },
+        });
+        index([
+            {
+                ...alpha,
+                type: "place",
+                shortcode: "guild",
+                address: { slug: "place-guild", canonical: "test-none-place-guild" },
+                file: { path: "Guild.md" },
+            },
+        ]);
+        indexFor(workspace.foreignWorkspace(foreign.directory), [
+            {
+                package: "other",
+                type: "place",
+                shortcode: "route",
+                data: { routes: [{ to: "test-none-place-guild" }] },
+                file: { path: "Route.md" },
+            },
+        ]);
+        respond(workspace, {
+            method: "textDocument/didOpen",
+            params: {
+                textDocument: {
+                    uri: source,
+                    text: "See [[test-none-place-guild|Unsaved]] twice.\n",
+                },
+            },
+        });
+        const results = workspace.references(target, { line: 2, character: 14 });
+        expect(results).toHaveLength(2);
+        expect(results.every((result) => result.uri === source)).toBe(true);
+        expect(results.map((result) => result.range.start.line)).toEqual([7, 5]);
+    });
+
+    it("reports a missing foreign root while preserving available results", () => {
+        savedLore("Alpha.md", "alpha", "Shared Name");
+        const foreign = foreignProject();
+        foreign.save(
+            "Beta.md",
+            "---\ntype: lore\nshortcode: beta\nname:\n  full: Shared Name\n---\n",
+        );
+        const missing = path.join(root, "missing-project");
+        const status: string[] = [];
+        workspace.onStatus = (message: string | null) => {
+            if (message) status.push(message);
+        };
+        respond(workspace, {
+            method: "initialize",
+            params: { initializationOptions: { foreignRoots: [missing, foreign.directory] } },
+        });
+        expect(workspace.symbols("all:Shared Name")).toHaveLength(2);
+        expect(status.join("\n")).toContain(missing);
+    });
+
+    it("recovers a missing foreign index after a foreign note is saved", () => {
+        vi.useFakeTimers();
+        savedLore("Alpha.md", "alpha", "Shared Name");
+        const foreign = foreignProject();
+        const status: string[] = [];
+        workspace.onStatus = (message: string | null) => {
+            if (message) status.push(message);
+        };
+        respond(workspace, {
+            method: "initialize",
+            params: { initializationOptions: { foreignRoots: [foreign.directory] } },
+        });
+        expect(workspace.symbols("all:Shared Name")).toHaveLength(1);
+        expect(status.join("\n")).toContain("No index is available");
+        const uri = foreign.save(
+            "Beta.md",
+            "---\ntype: lore\nshortcode: beta\nname:\n  full: Shared Name\n---\n",
+        );
+        respond(workspace, { method: "textDocument/didSave", params: { textDocument: { uri } } });
+        vi.advanceTimersByTime(300);
+        expect(workspace.symbols("all:Shared Name")).toHaveLength(2);
+    });
+
+    it("validates a complete foreign cache on first use without rebuilding it", () => {
+        savedLore("Alpha.md", "alpha", "Local");
+        const foreign = foreignProject();
+        foreign.save("Beta.md", "---\ntype: lore\nshortcode: beta\n---\n");
+        respond(workspace, {
+            method: "initialize",
+            params: { initializationOptions: { foreignRoots: [foreign.directory] } },
+        });
+        const project = workspace.foreignWorkspace(foreign.directory);
+        indexFor(project, [
+            {
+                ...alpha,
+                package: "other",
+                shortcode: "beta",
+                name: { full: "Cached Foreign" },
+                file: { path: "Beta.md" },
+            },
+        ]);
+        project.started = false;
+        const rebuild = vi.spyOn(project, "rebuild");
+        expect(workspace.symbols("all:Cached Foreign")).toHaveLength(1);
+        expect(rebuild).not.toHaveBeenCalled();
+    });
+
+    it("rebuilds an incompatible foreign cache before searching it", () => {
+        savedLore("Alpha.md", "alpha", "Local");
+        const foreign = foreignProject();
+        foreign.save(
+            "Beta.md",
+            "---\ntype: lore\nshortcode: beta\nname:\n  full: Fresh Foreign\n---\n",
+        );
+        respond(workspace, {
+            method: "initialize",
+            params: { initializationOptions: { foreignRoots: [foreign.directory] } },
+        });
+        const project = workspace.foreignWorkspace(foreign.directory);
+        indexFor(project, [
+            {
+                ...alpha,
+                package: "other",
+                name: { full: "Old Foreign" },
+                file: { path: "Beta.md" },
+            },
+        ]);
+        const manifest = path.join(project.cacheDirectory, "metadata.json");
+        const metadata = JSON.parse(fs.readFileSync(manifest, "utf8"));
+        metadata.generatorVersion = "0.0.0";
+        fs.writeFileSync(manifest, JSON.stringify(metadata));
+        project.started = false;
+        expect(workspace.symbols("all:Fresh Foreign")).toHaveLength(1);
+        expect(workspace.symbols("all:Old Foreign")).toHaveLength(0);
+    });
+
     it("builds its private index from saved notes on initialization", () => {
         savedLore("Alpha.md", "alpha", "Alpha");
         const result = respond(workspace, { method: "initialize" });
@@ -350,6 +632,13 @@ describe("content language server", () => {
                 shortcode: "guild",
                 address: { slug: "affiliation-guild", canonical: "test-none-docaffiliation-guild" },
                 file: { path: "Guild.md" },
+            },
+            {
+                package: "test",
+                type: "affiliation",
+                shortcode: "ally",
+                data: { relations: { guild: "ally" } },
+                file: { path: "Ally.md" },
             },
         ]);
         expect(workspace.references(target, { line: 2, character: 13 })).toEqual([

@@ -23,8 +23,24 @@ The first prints the private JSONL path. The second is manual recovery when a fi
 | `workspace/symbol`        | Finds notes by name, alias, ASCII name, shortcode, or Address. `tag:myth` searches tags. One result appears per source note. |
 | `textDocument/references` | Finds authored wikilinks, embeds, and declared frontmatter Address values or keys. Ordinary prose is excluded.               |
 
-Reference search scans saved Markdown notes in the configured content tree. The server writes only LSP messages to stdout and uses UTF-16 positions.
+Reference search uses indexed frontmatter to select candidates and reads saved Markdown source for exact ranges and body links. Unsaved edits identify the target under the cursor but do not enter workspace search. The server writes only LSP messages to stdout and uses UTF-16 positions.
+
+## Foreign content projects
+
+An LSP client selects foreign project roots through `initialize`:
+
+```json
+{
+  "initializationOptions": {
+    "foreignRoots": ["/absolute/path/to/another/content/project"]
+  }
+}
+```
+
+The paths name repositories containing their own `package-build.config.yaml`, `.yml`, or `.mjs`. They are editor search configuration, independent of a package's build dependencies. The server validates each foreign project's private index when first used and rebuilds it from saved source if missing or incompatible. A valid complete cache is reusable. An unconfigured cache never adds a project to search. A failed foreign root produces an LSP status message while available projects remain searchable. Save and file-operation notifications refresh the affected project. Clients can update the root list with `workspace/didChangeConfiguration` using `settings.heroiclands.foreignRoots`.
+
+Plain `workspace/symbol` queries search the current project. Prefix the query with `all:` to include configured foreign projects; `all:tag:myth` searches tags in that scope. Results name the owning package and open its source note. Package-qualified definitions open a note or asset from its owning root. A bare Address with matches in multiple configured projects returns all destinations for the client to present. `textDocument/references` searches the current and configured foreign projects and reports exact saved source ranges.
 
 ## Editor integration
 
-An LSP client starts the executable with the content project as its working directory and associates it with Markdown notes under the configured content directory. The process handles `initialize`, `shutdown`, `exit`, full and incremental document synchronization, save and file-operation notifications, definition, references, and workspace symbols. It does not advertise completion, diagnostics, rename, or document symbols. An editor integration supplies its own installation, project discovery, and UI commands.
+An LSP client starts the executable with the content project as its working directory and associates it with Markdown notes under the configured content directory. The process handles `initialize`, `shutdown`, `exit`, full and incremental document synchronization, save and file-operation notifications, configuration changes, definition, references, and workspace symbols. It does not advertise completion, diagnostics, rename, or document symbols. An editor integration supplies its own installation, project discovery, and UI commands.
