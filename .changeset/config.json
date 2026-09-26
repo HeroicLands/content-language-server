@@ -1,0 +1,9 @@
+{
+    "$schema": "https://unpkg.com/@changesets/config@4.0.0/schema.json",
+    "changelog": "@heroiclands/package-build/changelog",
+    "commit": false,
+    "baseBranch": "main",
+    "access": "public",
+    "updateInternalDependencies": "patch",
+    "ignore": []
+}

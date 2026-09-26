@@ -1,0 +1,29 @@
+name: Build and Test
+
+on:
+    pull_request:
+        branches: [main]
+    push:
+        branches: [main]
+
+permissions:
+    contents: read
+
+jobs:
+    test-build:
+        name: Build & Test
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            - name: Check for forbidden markers
+              uses: HeroicLands/.github/actions/todos@main
+              with:
+                  paths: .
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 24
+                  cache: npm
+            - run: npm ci
+            - run: npm run format:check
+            - run: npm test
+            - run: npm pack --dry-run --json
