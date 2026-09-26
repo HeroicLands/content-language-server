@@ -8,4 +8,6 @@ Install an exact released package version in a directory managed by your editor 
 
 See the [language server guide](docs/content-language-server.md) for LSP requests, cache locations, error handling, and manual recovery commands.
 
+Editors can pass explicit foreign content roots in LSP initialization options. A normal workspace-symbol query stays in the current project; an `all:` query searches the configured roots as well. The server returns standard LSP symbols and locations, so the editor controls how results are presented.
+
 Maintainers use the [publishing guide](docs/publishing.md) for the first npm release and trusted publisher configuration.
