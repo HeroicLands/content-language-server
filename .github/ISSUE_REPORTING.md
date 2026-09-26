@@ -2,7 +2,7 @@
 
 ## 1. Scope
 
-File language-server implementation and protocol behavior here. File content generation and Address-rule defects in `package-build`; file editor integration defects in `heroiclands-emacs`.
+File language-server implementation and protocol behavior here. File content generation and Address-rule defects in `package-build`; file editor integration defects in the repository for that editor's client.
 
 ## 2. Work shape
 
@@ -28,4 +28,4 @@ The closed registry in `labels.yml` holds the colors and descriptions. Update bo
 
 ## 9. Routing
 
-File a defect in the repository whose code must change. This repository owns the server executable, private editor index, protocol handlers, and server documentation. `package-build` owns the shared JSONL generator, content parser, and Address rules. `heroiclands-emacs` owns installation, commands, keybindings, and Info help.
+File a defect in the repository whose code must change. This repository owns the server executable, private index, protocol handlers, and server documentation. `package-build` owns the shared JSONL generator, content parser, and Address rules. Each editor client owns its installation, commands, keybindings, and help.

@@ -27,6 +27,4 @@ Reference search scans saved Markdown notes in the configured content tree. The 
 
 ## Editor integration
 
-The [HeroicLands Emacs package](https://github.com/HeroicLands/heroiclands-emacs) connects the server through Eglot in content Markdown buffers. Set `heroiclands-eglot-server-command` to this package's executable. Eglot maps `M-.` to definition, `C-M-.` to workspace search, `M-?` to references, and `M-,` to the Xref location stack.
-
-An editor other than Emacs starts the executable from the package root and associates it with Markdown notes under the configured content directory. The process handles `initialize`, `shutdown`, `exit`, full and incremental document synchronization, save and file-operation notifications, definition, references, and workspace symbols. It does not advertise completion, diagnostics, rename, or document symbols.
+An LSP client starts the executable with the content project as its working directory and associates it with Markdown notes under the configured content directory. The process handles `initialize`, `shutdown`, `exit`, full and incremental document synchronization, save and file-operation notifications, definition, references, and workspace symbols. It does not advertise completion, diagnostics, rename, or document symbols. An editor integration supplies its own installation, project discovery, and UI commands.
