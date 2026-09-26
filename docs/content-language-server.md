@@ -17,12 +17,12 @@ heroiclands-content-language-server --rebuild-index
 
 The first prints the private JSONL path. The second is manual recovery when a file operation did not trigger a rebuild; it prints the path on success and exits nonzero on failure. Restarting the server also rebuilds from saved source. A failed rebuild leaves the complete prior snapshot in place. If there is no valid prior snapshot, navigation reports that no index is available.
 
-| LSP request               | Behavior                                                                                                                     |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `textDocument/definition` | Follows an Address or wikilink to the indexed note. An anchor lands on its indexed line.                                     |
-| `textDocument/completion` | Completes unfinished wikilinks, anchors, and declared frontmatter Address values or keys.                                    |
-| `workspace/symbol`        | Finds notes by name, alias, ASCII name, shortcode, or Address. `tag:myth` searches tags. One result appears per source note. |
-| `textDocument/references` | Finds authored wikilinks, embeds, and declared frontmatter Address values or keys. Ordinary prose is excluded.               |
+| LSP request               | Behavior                                                                                                                                              |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `textDocument/definition` | Follows an Address or wikilink to the indexed note. An anchor lands on its indexed line.                                                              |
+| `textDocument/completion` | Completes unfinished wikilinks, anchors, and declared frontmatter Address values or keys.                                                             |
+| `workspace/symbol`        | Finds notes by name, alias, ASCII name, shortcode, or Address. Field and project prefixes narrow the saved index. One result appears per source note. |
+| `textDocument/references` | Finds authored wikilinks, embeds, and declared frontmatter Address values or keys. Ordinary prose is excluded.                                        |
 
 Reference search uses indexed frontmatter to select candidates and reads saved Markdown source for exact ranges and body links. Unsaved edits identify the target under the cursor but do not enter workspace search. The server writes only LSP messages to stdout and uses UTF-16 positions.
 
@@ -50,7 +50,20 @@ An LSP client selects foreign project roots through `initialize`:
 
 The paths name repositories containing their own `package-build.config.yaml`, `.yml`, or `.mjs`. They are editor search configuration, independent of a package's build dependencies. The server validates each foreign project's private index when first used and rebuilds it from saved source if missing or incompatible. A valid complete cache is reusable. An unconfigured cache never adds a project to search. A failed foreign root produces an LSP status message while available projects remain searchable. Save and file-operation notifications refresh the affected project. Clients can update the root list with `workspace/didChangeConfiguration` using `settings.heroiclands.foreignRoots`.
 
-Plain `workspace/symbol` queries search the current project. Prefix the query with `all:` to include configured foreign projects; `all:tag:myth` searches tags in that scope. Results name the owning package and open its source note. Package-qualified definitions open a note or asset from its owning root. A bare Address uses the citing project's package default. `textDocument/references` searches the current and configured foreign projects and reports exact saved source ranges.
+Plain `workspace/symbol` queries search names, aliases, shortcodes, and Addresses in the current project. The query prefixes below narrow matches using saved JSONL records. Searches do not read unsaved frontmatter or scan Markdown files.
+
+| Query                         | Matches                                                         |
+| ----------------------------- | --------------------------------------------------------------- |
+| `name:alyra`                  | Full names and aliases, including their ASCII forms             |
+| `shortcode:alpha`             | Shortcodes                                                      |
+| `type:lore`                   | Note types                                                      |
+| `tag:myth`                    | Tags                                                            |
+| `all:camel`                   | Ordinary matches in the current and configured foreign projects |
+| `all:type:lore`               | A field filter across those projects                            |
+| `package:thalorna`            | All indexed notes in that configured package                    |
+| `package:thalorna name:camel` | A field filter within that package                              |
+
+`package:` selects the current project or an explicitly configured foreign project by its exact package name. It does not discover other caches or add a build dependency. A missing package or an unknown prefix returns no results. An empty unqualified query lists the current project's notes; an incomplete `name:`, `shortcode:`, `type:`, or `package:` query returns no results. Results name the owning package and open its source note. Package-qualified definitions open a note or asset from its owning root. A bare Address uses the citing project's package default. `textDocument/references` searches the current and configured foreign projects and reports exact saved source ranges.
 
 ## Editor integration
 

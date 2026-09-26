@@ -78,6 +78,31 @@ function searchKey(value) {
     return typeof value === "string" ? (asciiName(value) ?? "").toLowerCase() : "";
 }
 
+/** Parse editor symbol filters without looking outside configured projects. */
+function symbolQuery(query) {
+    let text = String(query ?? "").trim();
+    let includeForeign = false;
+    if (/^all:/i.test(text)) {
+        includeForeign = true;
+        text = text.slice(4).trim();
+    }
+    let selectedPackage = null;
+    if (/^package:/i.test(text)) {
+        const selected = /^package:([^\s]+)(?:\s+(.*))?$/i.exec(text);
+        if (!selected) return null;
+        selectedPackage = selected[1].toLowerCase();
+        text = (selected[2] ?? "").trim();
+        includeForeign = true;
+    }
+    const prefix = /^([a-z]+):(.*)$/is.exec(text);
+    if (prefix && !["name", "shortcode", "type", "tag"].includes(prefix[1].toLowerCase()))
+        return null;
+    const field = prefix?.[1].toLowerCase() ?? "all";
+    const needle = (prefix ? prefix[2] : text).trim();
+    if (field !== "all" && field !== "tag" && !needle) return null;
+    return { includeForeign, selectedPackage, field, needle };
+}
+
 /** A completion item changes the Address text while its label remains readable. */
 function completionItem(label, detail, inserted, text, from, to, filterText) {
     return {
@@ -170,13 +195,21 @@ export class ContentWorkspace {
     }
 
     /** Return usable indexes, reporting one failed root without hiding the others. */
-    indexedWorkspaces(includeForeign = false) {
+    indexedWorkspaces(includeForeign = false, selectedPackage = null) {
         this.requireIndex();
-        const projects = [this];
+        const projects =
+            selectedPackage && this.config.contentPackage.toLowerCase() !== selectedPackage ?
+                []
+            :   [this];
         if (includeForeign)
             for (const root of this.foreignRoots) {
                 try {
                     const project = this.foreignWorkspace(root);
+                    if (
+                        selectedPackage &&
+                        project.config.contentPackage.toLowerCase() !== selectedPackage
+                    )
+                        continue;
                     project.start(true);
                     project.requireIndex();
                     projects.push(project);
@@ -759,33 +792,36 @@ export class ContentWorkspace {
     }
 
     symbols(query) {
-        const includeForeign = /^all:/i.test(query);
-        const search = includeForeign ? query.slice(4) : query;
-        return this.indexedWorkspaces(includeForeign).flatMap((project) =>
-            project.symbolMatches(search),
+        const filter = symbolQuery(query);
+        if (!filter) return [];
+        return this.indexedWorkspaces(filter.includeForeign, filter.selectedPackage).flatMap(
+            (project) => project.symbolMatches(filter),
         );
     }
 
-    symbolMatches(query) {
-        const tag = /^tag:(.*)$/i.exec(query);
-        const needle = (tag ? tag[1] : query).trim().toLowerCase();
+    symbolMatches({ field, needle }) {
+        const normalized = field === "name" ? searchKey(needle) : needle.toLowerCase();
         const found = new Map();
         for (const record of this.records) {
             if (!record.file?.path) continue;
+            const names = [
+                record.name?.full,
+                record.nameAscii,
+                ...(record.name?.aliases ?? []),
+                ...(record.aliasesAscii ?? []),
+            ];
             const values =
-                tag ?
-                    (record.tags ?? [])
-                :   [
-                        record.name?.full,
-                        record.nameAscii,
-                        ...(record.name?.aliases ?? []),
-                        ...(record.aliasesAscii ?? []),
-                        record.shortcode,
-                        record.address?.slug,
-                        record.address?.canonical,
-                    ];
+                field === "tag" ? (record.tags ?? [])
+                : field === "name" ? names
+                : field === "shortcode" ? [record.shortcode]
+                : field === "type" ? [record.type]
+                : [...names, record.shortcode, record.address?.slug, record.address?.canonical];
             const match = values.find(
-                (value) => typeof value === "string" && value.toLowerCase().includes(needle),
+                (value) =>
+                    typeof value === "string" &&
+                    (field === "name" ? searchKey(value) : value.toLowerCase()).includes(
+                        normalized,
+                    ),
             );
             if (!match) continue;
             const file = noteFile(this.contentRoot, record);
@@ -793,7 +829,7 @@ export class ContentWorkspace {
             found.set(file, {
                 name: String(noteName(record)),
                 kind: 1,
-                containerName: `${record.package} · ${record.address?.slug ?? [record.type, record.shortcode].filter(Boolean).join(" ")} · ${tag ? `tag: ${match}` : match}`,
+                containerName: `${record.package} · ${record.address?.slug ?? [record.type, record.shortcode].filter(Boolean).join(" ")} · ${field === "tag" ? `tag: ${match}` : match}`,
                 location: { uri: pathToFileURL(file).href, range: EMPTY_RANGE },
             });
         }
