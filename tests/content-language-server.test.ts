@@ -830,6 +830,62 @@ describe("content language server", () => {
         expect(workspace.symbols("tag:other")).toHaveLength(0);
     });
 
+    it("filters symbols by indexed name, shortcode, type, and package", () => {
+        note("Alpha.md", "---\ntype: lore\nshortcode: alpha\n---\nÁlyra\n");
+        note("Beta.md", "---\ntype: place\nshortcode: beta\n---\nCamel\n");
+        index([
+            alpha,
+            { ...alpha, type: "lore" },
+            {
+                ...alpha,
+                type: "place",
+                shortcode: "beta",
+                name: { full: "Camel Crossing", aliases: ["Old Ford"] },
+                nameAscii: "Camel Crossing",
+                aliasesAscii: ["Old Ford"],
+                tags: [],
+                address: { slug: "place-beta", canonical: "test-note-place-beta" },
+                file: { path: "Beta.md" },
+            },
+        ]);
+        expect(workspace.symbols("name:alyra")).toHaveLength(1);
+        expect(workspace.symbols("name:old ford")).toHaveLength(1);
+        expect(workspace.symbols("shortcode:beta")).toHaveLength(1);
+        expect(workspace.symbols("type:place")).toHaveLength(1);
+        expect(workspace.symbols("package:test")).toHaveLength(2);
+        expect(workspace.symbols("name:")).toEqual([]);
+        expect(workspace.symbols("unknown:camel")).toEqual([]);
+        expect(workspace.symbols("")).toHaveLength(2);
+        expect(workspace.symbols("tag:myth")).toHaveLength(1);
+    });
+
+    it("selects configured foreign projects by package without admitting unconfigured caches", () => {
+        savedLore("Alpha.md", "alpha", "Shared Name");
+        const foreign = foreignProject();
+        const foreignUri = foreign.save(
+            "Beta.md",
+            "---\ntype: lore\nshortcode: beta\nname:\n  full: Shared Name\n---\n",
+        );
+        respond(workspace, {
+            method: "initialize",
+            params: { initializationOptions: { foreignRoots: [foreign.directory] } },
+        });
+        const symbols = respond(workspace, {
+            method: "workspace/symbol",
+            params: { query: "package:other name:shared" },
+        }) as any[];
+        expect(symbols).toHaveLength(1);
+        expect(symbols[0].location.uri).toBe(foreignUri);
+        expect(symbols[0].containerName).toContain("other ·");
+        expect(workspace.symbols("all:type:lore")).toHaveLength(2);
+        expect(workspace.symbols("package:missing")).toEqual([]);
+        respond(workspace, {
+            method: "workspace/didChangeConfiguration",
+            params: { settings: { heroiclands: { foreignRoots: [] } } },
+        });
+        expect(workspace.symbols("package:other")).toEqual([]);
+    });
+
     it("finds indexed draft and stub notes without published addresses", () => {
         note("Stub.md", "---\ntype: lore\nshortcode: stub\n---\n");
         index([
