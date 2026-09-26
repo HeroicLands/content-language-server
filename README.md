@@ -10,6 +10,6 @@ See the [language server guide](docs/content-language-server.md) for LSP request
 
 Editors can pass explicit foreign content roots in LSP initialization options. A normal workspace-symbol query stays in the current project; an `all:` query searches the configured roots as well. The server returns standard LSP symbols and locations, so the editor controls how results are presented.
 
-Completion searches anywhere in indexed names, aliases, and Addresses. It inserts the shortest Address that identifies the selected target in the current note, including its system or package when needed. Clients receive standard LSP completion items with exact text edits.
+Completion searches anywhere in indexed names, aliases, and Addresses. It inserts the shortest Address that identifies the selected target in the current note, including its system or package when needed. Ordinary `[[...]]` links default to readable `note` content; `![[...]]` embeds default to systemless `none` assets. Clients receive standard LSP completion items with exact text edits.
 
 Maintainers use the [publishing guide](docs/publishing.md) for the first npm release and trusted publisher configuration.

@@ -25,6 +25,7 @@ import {
 } from "./content-language-index.mjs";
 import { codeRegions, matchAllOutsideCode } from "@heroiclands/package-build/engine/code-fences";
 import { embedsIn, EMBED_DEFAULT_TYPE } from "@heroiclands/package-build/engine/content-embeds";
+import { ASSET_TYPE_NAMES } from "@heroiclands/package-build/engine/asset-types";
 
 const EMPTY_RANGE = { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } };
 const require = createRequire(import.meta.url);
@@ -189,16 +190,17 @@ export class ContentWorkspace {
     /** Find every indexed owner of a written Address for navigation. */
     resolveCandidates(value, defaults = {}, projects = [this]) {
         const packages = new Set(projects.map((project) => project.config.contentPackage));
+        const tuple = parseAddress(value, {
+            package: this.config.contentPackage,
+            system: "note",
+            types: new Set(projects.flatMap((project) => [...project.types])),
+            packages,
+            ...defaults,
+        });
+        if (tuple.reason) return [];
         const found = [];
         for (const project of projects) {
-            const tuple = parseAddress(value, {
-                package: project.config.contentPackage,
-                system: "none",
-                types: project.types,
-                packages,
-                ...defaults,
-            });
-            if (tuple.reason) continue;
+            if (project.config.contentPackage !== tuple.package) continue;
             const record = project.byAddress.get(renderAddress(tuple));
             if (record) found.push({ record, project });
         }
@@ -382,7 +384,7 @@ export class ContentWorkspace {
     resolve(value, defaults = {}, projects = [this]) {
         const tuple = parseAddress(value, {
             package: this.config.contentPackage,
-            system: "none",
+            system: "note",
             types: new Set(projects.flatMap((project) => [...project.types])),
             packages: new Set(projects.map((project) => project.config.contentPackage)),
             ...defaults,
@@ -410,7 +412,7 @@ export class ContentWorkspace {
         ];
         const vocabulary = {
             package: this.config.contentPackage,
-            system: defaults.system ?? "none",
+            system: defaults.system ?? "note",
             type: defaults.type,
             types: new Set(projects.flatMap((project) => [...project.types])),
             packages: new Set(projects.map((project) => project.config.contentPackage)),
@@ -441,12 +443,23 @@ export class ContentWorkspace {
         const before = text.slice(lineStart, offset);
         const open = before.lastIndexOf("[[");
         if (open < 0 || before.slice(open + 2).includes("]]")) return null;
+        const embed = open > 0 && before[open - 1] === "!";
         if (text.slice(offset, lineEnd < 0 ? text.length : lineEnd).includes("]]")) return null;
         const from = lineStart + open + 2;
         const written = text.slice(from, offset);
         if (written.includes("|") || written.includes("[") || written.includes("]")) return null;
         const hash = written.indexOf("#");
-        if (hash < 0) return { kind: "address", from, to: offset, query: written, defaults: {} };
+        const defaults = embed ? { system: "none", type: EMBED_DEFAULT_TYPE } : {};
+        if (hash < 0)
+            return {
+                kind: "address",
+                from,
+                to: offset,
+                query: written,
+                defaults,
+                accepts: embed ? [...ASSET_TYPE_NAMES] : null,
+            };
+        if (embed) return null;
         const target = this.resolve(written.slice(0, hash), {}, projects);
         if (!target) return null;
         return {
@@ -495,7 +508,7 @@ export class ContentWorkspace {
                 from: header.length + start,
                 to: header.length + finish,
                 query: yamlText.slice(start, cursor),
-                defaults: { system: position.system ?? "none", type: position.type },
+                defaults: { system: position.system ?? "note", type: position.type },
                 accepts: position.accepts ?? (position.type ? [position.type] : null),
             };
         };
@@ -592,6 +605,7 @@ export class ContentWorkspace {
         const bodyStart = text.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/)?.[0].length ?? 0;
         const linkText = text.slice(bodyStart);
         for (const match of matchAllOutsideCode(linkText, new RegExp(WIKILINK.source, "g"))) {
+            if (match.index > 0 && linkText[match.index - 1] === "!") continue;
             const parsed = parseWikilink(match[1]);
             const record =
                 parsed.target ? this.resolve(parsed.target, {}, projects) : this.byFile.get(file);
@@ -611,7 +625,7 @@ export class ContentWorkspace {
             });
         }
         for (const embed of embedsIn(linkText)) {
-            const defaults = { type: EMBED_DEFAULT_TYPE };
+            const defaults = { system: "none", type: EMBED_DEFAULT_TYPE };
             const record = this.resolve(embed.written, defaults, projects);
             if (!record) continue;
             const start = bodyStart + embed.index + 3;
@@ -655,7 +669,7 @@ export class ContentWorkspace {
             const scalar = (part, value) => {
                 if (!YAML.isScalar(part) || typeof value !== "string" || !part.range) return;
                 const defaults = {
-                    system: position.system ?? "none",
+                    system: position.system ?? "note",
                     type: position.type,
                 };
                 const record = this.resolve(value, defaults, projects);
