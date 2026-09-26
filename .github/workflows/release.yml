@@ -1,0 +1,63 @@
+name: Publish to npm
+
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+permissions:
+    contents: write
+    pull-requests: write
+    id-token: write
+    statuses: write
+
+concurrency:
+    group: release
+    cancel-in-progress: false
+
+jobs:
+    release:
+        name: Version and publish @heroiclands/content-language-server
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 24
+                  cache: npm
+                  registry-url: https://registry.npmjs.org
+            - run: npm ci
+            - run: npm test
+            - run: npm pack --dry-run --json
+            - name: Confirm npm can use OIDC
+              run: |
+                  VERSION="$(npm --version)"
+                  MAJOR="${VERSION%%.*}"
+                  REST="${VERSION#*.}"
+                  MINOR="${REST%%.*}"
+                  if [ "$MAJOR" -lt 11 ] || { [ "$MAJOR" -eq 11 ] && [ "$MINOR" -lt 5 ]; }; then
+                    echo "::error::npm $VERSION cannot use OIDC Trusted Publishing, which needs >= 11.5." >&2
+                    exit 1
+                  fi
+            - name: Version, or publish
+              id: changesets
+              uses: changesets/action@v2
+              with:
+                  version-script: npm run changeset:version
+                  publish-script: npx changeset publish
+                  commit-message: "chore(release): version packages"
+                  pr-title: "chore(release): version packages"
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            - name: Mark the version pull request as having passed the build
+              if: steps.changesets.outputs['pr-number'] != ''
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  SHA=$(gh api "repos/${{ github.repository }}/pulls/${{ steps.changesets.outputs['pr-number'] }}" --jq .head.sha)
+                  gh api --method POST "repos/${{ github.repository }}/statuses/$SHA" \
+                    -f state=success \
+                    -f context='Build & Test' \
+                    -f description='This pull request is the version bump.'
