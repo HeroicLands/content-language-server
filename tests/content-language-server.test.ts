@@ -125,6 +125,210 @@ function foreignProject(contentPackage = "other") {
 }
 
 describe("content language server", () => {
+    it("completes middle-of-name matches with the shortest unambiguous Address", () => {
+        const source = note("Source.md", "See [[camel");
+        const localBeing = {
+            ...alpha,
+            package: "test",
+            type: "being",
+            shortcode: "bctrncml",
+            name: { full: "Xerathian Bactrian Camel" },
+            nameAscii: "Xerathian Bactrian Camel",
+            address: { slug: "being-bctrncml", canonical: "test-sohl-being-bctrncml" },
+            file: { path: "Camel.md" },
+        };
+        index([
+            localBeing,
+            {
+                ...localBeing,
+                type: "docbeing",
+                address: { slug: "docbeing-bctrncml", canonical: "test-none-docbeing-bctrncml" },
+            },
+            {
+                ...alpha,
+                shortcode: "triceritops",
+                name: { full: "Bicamelan Triceritops" },
+                nameAscii: "Bicamelan Triceritops",
+                address: { slug: "lore-triceritops", canonical: "test-none-lore-triceritops" },
+                file: { path: "Triceritops.md" },
+            },
+        ]);
+        const foreign = foreignProject("sohl");
+        indexFor(workspace.foreignWorkspace(foreign.directory), [
+            {
+                ...localBeing,
+                package: "sohl",
+                name: { full: "Bactrian Camel" },
+                nameAscii: "Bactrian Camel",
+                address: { slug: "being-bctrncml", canonical: "sohl-sohl-being-bctrncml" },
+            },
+        ]);
+        workspace.configureForeignRoots([foreign.directory]);
+        const items = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 0, character: 11 } },
+        }) as any[];
+        expect(items.some((item) => item.label.startsWith("Bicamelan Triceritops"))).toBe(true);
+        expect(items.some((item) => item.label.startsWith("Bactrian Camel"))).toBe(true);
+        expect(items.some((item) => item.label.startsWith("Xerathian Bactrian Camel"))).toBe(true);
+        expect(
+            items.find((item) => item.detail.includes("test-sohl-being-bctrncml"))?.textEdit,
+        ).toMatchObject({ newText: "sohl-being-bctrncml" });
+        expect(
+            items.find((item) => item.detail.includes("sohl-sohl-being-bctrncml"))?.textEdit,
+        ).toMatchObject({ newText: "sohl-sohl-being-bctrncml" });
+        expect(
+            items.filter((item) => item.detail.includes("test-none-docbeing-bctrncml")),
+        ).toHaveLength(1);
+        expect(items.every((item) => item.filterText === "camel")).toBe(true);
+        expect(items.every((item) => item.textEdit.range.start.character === 6)).toBe(true);
+    });
+
+    it("completes an empty link and a qualified Address without editing a closed link", () => {
+        const source = note("Source.md", "[[");
+        index([alpha, alpha]);
+        const empty = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 0, character: 2 } },
+        }) as any[];
+        expect(empty).toHaveLength(1);
+        respond(workspace, {
+            method: "textDocument/didChange",
+            params: {
+                textDocument: { uri: source },
+                contentChanges: [{ text: "[[test-none-lore-al" }],
+            },
+        });
+        const qualified = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 0, character: 19 } },
+        }) as any[];
+        expect(qualified).toHaveLength(1);
+        expect(qualified[0].textEdit.newText).toBe("lore-alpha");
+        respond(workspace, {
+            method: "textDocument/didChange",
+            params: {
+                textDocument: { uri: source },
+                contentChanges: [{ text: "[[lore-alpha|Ályra]]" }],
+            },
+        });
+        expect(
+            respond(workspace, {
+                method: "textDocument/completion",
+                params: { textDocument: { uri: source }, position: { line: 0, character: 6 } },
+            }),
+        ).toEqual([]);
+    });
+
+    it("does not load foreign indexes for completion in ordinary prose", () => {
+        const source = note("Source.md", "Plain prose.\n");
+        index([alpha]);
+        const missing = path.join(root, "missing-project");
+        const status: string[] = [];
+        workspace.onStatus = (message: string | null) => {
+            if (message) status.push(message);
+        };
+        workspace.configureForeignRoots([missing]);
+        expect(
+            respond(workspace, {
+                method: "textDocument/completion",
+                params: { textDocument: { uri: source }, position: { line: 0, character: 5 } },
+            }),
+        ).toEqual([]);
+        expect(status).toEqual([]);
+    });
+
+    it("completes aliases and anchors with exact UTF-16 edits", () => {
+        const source = note("Source.md", "🐪 [[light");
+        index([alpha]);
+        const named = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 0, character: 10 } },
+        }) as any[];
+        expect(named).toHaveLength(1);
+        expect(named[0].textEdit).toEqual({
+            range: {
+                start: { line: 0, character: 5 },
+                end: { line: 0, character: 10 },
+            },
+            newText: "lore-alpha",
+        });
+        respond(workspace, {
+            method: "textDocument/didChange",
+            params: {
+                textDocument: { uri: source },
+                contentChanges: [{ text: "See [[lore-alpha#his" }],
+            },
+        });
+        const anchors = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 0, character: 20 } },
+        }) as any[];
+        expect(anchors).toHaveLength(1);
+        expect(anchors[0].textEdit).toMatchObject({ newText: "history" });
+    });
+
+    it("completes declared frontmatter Address values from indexed records", () => {
+        const text =
+            "---\ntype: place\nshortcode: route\ndata:\n  routes:\n    - to: cam\n---\nBody.\n";
+        const source = note("Route.md", text);
+        index([
+            {
+                ...alpha,
+                type: "place",
+                shortcode: "camel",
+                name: { full: "Camel Crossing" },
+                nameAscii: "Camel Crossing",
+                address: { slug: "place-camel", canonical: "test-none-place-camel" },
+                file: { path: "Camel.md" },
+            },
+            alpha,
+        ]);
+        const items = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 5, character: 13 } },
+        }) as any[];
+        expect(items).toHaveLength(1);
+        expect(items[0].textEdit).toEqual({
+            range: {
+                start: { line: 5, character: 10 },
+                end: { line: 5, character: 13 },
+            },
+            newText: "camel",
+        });
+    });
+
+    it("completes declared Address keys while leaving their mapped values intact", () => {
+        const text =
+            "---\ntype: affiliation\nshortcode: source\ndata:\n  relations:\n    cam: rival\n---\n";
+        const source = note("Source.md", text);
+        index([
+            {
+                ...alpha,
+                type: "docaffiliation",
+                shortcode: "camel",
+                name: { full: "Camel Guild" },
+                nameAscii: "Camel Guild",
+                address: {
+                    slug: "docaffiliation-camel",
+                    canonical: "test-none-docaffiliation-camel",
+                },
+            },
+        ]);
+        const items = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 5, character: 7 } },
+        }) as any[];
+        expect(items).toHaveLength(1);
+        expect(items[0].textEdit).toEqual({
+            range: {
+                start: { line: 5, character: 4 },
+                end: { line: 5, character: 7 },
+            },
+            newText: "camel",
+        });
+    });
+
     it("searches foreign indexes only with an explicit symbol scope", () => {
         savedLore("Alpha.md", "alpha", "Shared Name");
         const foreign = foreignProject();
