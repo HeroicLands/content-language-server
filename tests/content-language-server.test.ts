@@ -8,7 +8,7 @@ import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
     ContentWorkspace,
     respond,
@@ -54,7 +54,7 @@ const alpha = {
     nameAscii: "Alyra",
     aliasesAscii: ["First Light"],
     tags: ["myth"],
-    address: { slug: "lore-alpha", canonical: "test-none-lore-alpha" },
+    address: { slug: "lore-alpha", canonical: "test-note-lore-alpha" },
     anchors: [{ slug: "history", line: 7, name: "History" }],
     file: { path: "Alpha.md" },
 };
@@ -125,6 +125,115 @@ function foreignProject(contentPackage = "other") {
 }
 
 describe("content language server", () => {
+    it("uses note for wikilinks and none for embedded asset completion", () => {
+        const source = note("Source.md", "[[camel");
+        index([
+            {
+                ...alpha,
+                type: "macro",
+                shortcode: "camel",
+                name: { full: "Camel Macro" },
+                address: { slug: "macro-camel", canonical: "test-note-macro-camel" },
+            },
+            {
+                ...alpha,
+                type: "macro",
+                shortcode: "camel",
+                name: { full: "Camel Macro" },
+                address: { slug: "macro-camel", canonical: "test-none-macro-camel" },
+            },
+            {
+                package: "test",
+                type: "image",
+                shortcode: "camel",
+                name: { full: "Camel Portrait" },
+                address: { canonical: "test-none-image-camel" },
+                asset: { path: "images/camel.webp" },
+            },
+        ]);
+        const links = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 0, character: 7 } },
+        }) as any[];
+        expect(
+            links.find((item) => item.detail.includes("test-note-macro-camel"))?.textEdit.newText,
+        ).toBe("macro-camel");
+        expect(
+            links.find((item) => item.detail.includes("test-none-macro-camel"))?.textEdit.newText,
+        ).toBe("none-macro-camel");
+        respond(workspace, {
+            method: "textDocument/didChange",
+            params: { textDocument: { uri: source }, contentChanges: [{ text: "![[camel" }] },
+        });
+        const embeds = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 0, character: 8 } },
+        }) as any[];
+        expect(embeds.map((item) => item.textEdit.newText)).toEqual(["camel"]);
+        expect(embeds[0].detail).toContain("test-none-image-camel");
+    });
+
+    it("resolves link and embed targets with their own defaults and counts each once", () => {
+        const text = "[[macro-camel|note]] [[none-macro-camel|sheet]]\n![[image-camel|picture]]\n";
+        const source = note("Source.md", text);
+        index([
+            {
+                ...alpha,
+                type: "macro",
+                shortcode: "camel",
+                address: { canonical: "test-note-macro-camel" },
+            },
+            {
+                ...alpha,
+                type: "macro",
+                shortcode: "camel",
+                address: { canonical: "test-none-macro-camel" },
+            },
+            {
+                package: "test",
+                type: "image",
+                shortcode: "camel",
+                address: { canonical: "test-none-image-camel" },
+                asset: { path: "images/camel.webp" },
+            },
+        ]);
+        workspace.requireIndex();
+        expect(workspace.resolve("note-macro-camel")?.address.canonical).toBe(
+            "test-note-macro-camel",
+        );
+        expect(workspace.resolve("none-macro-camel")?.address.canonical).toBe(
+            "test-none-macro-camel",
+        );
+        const found = workspace.referencesInText(text, fileURLToPath(source));
+        expect(found.map((entry) => entry.record.address.canonical)).toEqual([
+            "test-note-macro-camel",
+            "test-none-macro-camel",
+            "test-none-image-camel",
+        ]);
+    });
+
+    it("completes an art field against the systemless asset", () => {
+        const source = note(
+            "Source.md",
+            "---\ntype: being\nshortcode: source\ndata:\n  icon: cam\n---\n",
+        );
+        index([
+            {
+                package: "test",
+                type: "icon",
+                shortcode: "camel",
+                name: { full: "Camel Icon" },
+                address: { canonical: "test-none-icon-camel" },
+                asset: { path: "icons/camel.webp" },
+            },
+        ]);
+        const items = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 4, character: 11 } },
+        }) as any[];
+        expect(items.map((item) => item.textEdit.newText)).toEqual(["camel"]);
+    });
+
     it("completes middle-of-name matches with the shortest unambiguous Address", () => {
         const source = note("Source.md", "See [[camel");
         const localBeing = {
@@ -141,15 +250,15 @@ describe("content language server", () => {
             localBeing,
             {
                 ...localBeing,
-                type: "docbeing",
-                address: { slug: "docbeing-bctrncml", canonical: "test-none-docbeing-bctrncml" },
+                type: "being",
+                address: { slug: "being-bctrncml", canonical: "test-note-being-bctrncml" },
             },
             {
                 ...alpha,
                 shortcode: "triceritops",
                 name: { full: "Bicamelan Triceritops" },
                 nameAscii: "Bicamelan Triceritops",
-                address: { slug: "lore-triceritops", canonical: "test-none-lore-triceritops" },
+                address: { slug: "lore-triceritops", canonical: "test-note-lore-triceritops" },
                 file: { path: "Triceritops.md" },
             },
         ]);
@@ -178,7 +287,7 @@ describe("content language server", () => {
             items.find((item) => item.detail.includes("sohl-sohl-being-bctrncml"))?.textEdit,
         ).toMatchObject({ newText: "sohl-sohl-being-bctrncml" });
         expect(
-            items.filter((item) => item.detail.includes("test-none-docbeing-bctrncml")),
+            items.filter((item) => item.detail.includes("test-note-being-bctrncml")),
         ).toHaveLength(1);
         expect(items.every((item) => item.filterText === "camel")).toBe(true);
         expect(items.every((item) => item.textEdit.range.start.character === 6)).toBe(true);
@@ -196,7 +305,7 @@ describe("content language server", () => {
             method: "textDocument/didChange",
             params: {
                 textDocument: { uri: source },
-                contentChanges: [{ text: "[[test-none-lore-al" }],
+                contentChanges: [{ text: "[[test-note-lore-al" }],
             },
         });
         const qualified = respond(workspace, {
@@ -279,7 +388,7 @@ describe("content language server", () => {
                 shortcode: "camel",
                 name: { full: "Camel Crossing" },
                 nameAscii: "Camel Crossing",
-                address: { slug: "place-camel", canonical: "test-none-place-camel" },
+                address: { slug: "place-camel", canonical: "test-note-place-camel" },
                 file: { path: "Camel.md" },
             },
             alpha,
@@ -305,13 +414,13 @@ describe("content language server", () => {
         index([
             {
                 ...alpha,
-                type: "docaffiliation",
+                type: "affiliation",
                 shortcode: "camel",
                 name: { full: "Camel Guild" },
                 nameAscii: "Camel Guild",
                 address: {
-                    slug: "docaffiliation-camel",
-                    canonical: "test-none-docaffiliation-camel",
+                    slug: "affiliation-camel",
+                    canonical: "test-note-affiliation-camel",
                 },
             },
         ]);
@@ -359,7 +468,7 @@ describe("content language server", () => {
     });
 
     it("opens foreign canonical notes and assets from their owning roots", () => {
-        const sourceText = "See [[other-none-lore-beta|Beta]] and ![[other-none-icon-sun|Sun]].\n";
+        const sourceText = "See [[other-note-lore-beta|Beta]] and ![[other-none-icon-sun|Sun]].\n";
         const source = note("Source.md", sourceText);
         savedLore("Alpha.md", "alpha", "Local");
         const foreign = foreignProject();
@@ -381,7 +490,7 @@ describe("content language server", () => {
                 package: "other",
                 shortcode: "beta",
                 name: { full: "Beta" },
-                address: { slug: "lore-beta", canonical: "other-none-lore-beta" },
+                address: { slug: "lore-beta", canonical: "other-note-lore-beta" },
                 file: { path: "Beta.md" },
             },
             {
@@ -401,7 +510,7 @@ describe("content language server", () => {
         ).toBe(pathToFileURL(asset).href);
     });
 
-    it("returns both owning locations for an ambiguous bare Address", () => {
+    it("uses the citing package for a bare Address across configured projects", () => {
         const source = note("Source.md", "See [[lore-alpha|Shared]].\n");
         savedLore("Alpha.md", "alpha", "Local");
         const foreign = foreignProject();
@@ -421,17 +530,12 @@ describe("content language server", () => {
                 file: { path: "Alpha.md" },
                 address: {
                     slug: "lore-alpha",
-                    canonical: "other-none-lore-alpha",
+                    canonical: "other-note-lore-alpha",
                 },
             },
         ]);
         const result = workspace.definition(source, { line: 0, character: 10 });
-        expect(Array.isArray(result)).toBe(true);
-        expect(result).toHaveLength(2);
-        expect(result.map((entry: any) => entry.uri)).toEqual([
-            expect.stringContaining(root),
-            expect.stringContaining(foreign.directory),
-        ]);
+        expect(result?.uri).toContain(root);
     });
 
     it("finds foreign body and indexed frontmatter references with saved ranges", () => {
@@ -439,7 +543,7 @@ describe("content language server", () => {
         const foreign = foreignProject();
         const source = foreign.save(
             "Route.md",
-            "---\ntype: place\nshortcode: route\ndata:\n  routes:\n    - to: test-none-place-guild\n---\nSee [[test-none-place-guild|Guild]].\n",
+            "---\ntype: place\nshortcode: route\ndata:\n  routes:\n    - to: test-note-place-guild\n---\nSee [[test-note-place-guild|Guild]].\n",
         );
         respond(workspace, {
             method: "initialize",
@@ -450,7 +554,7 @@ describe("content language server", () => {
                 ...alpha,
                 type: "place",
                 shortcode: "guild",
-                address: { slug: "place-guild", canonical: "test-none-place-guild" },
+                address: { slug: "place-guild", canonical: "test-note-place-guild" },
                 file: { path: "Guild.md" },
             },
         ]);
@@ -459,7 +563,7 @@ describe("content language server", () => {
                 package: "other",
                 type: "place",
                 shortcode: "route",
-                data: { routes: [{ to: "test-none-place-guild" }] },
+                data: { routes: [{ to: "test-note-place-guild" }] },
                 file: { path: "Route.md" },
             },
         ]);
@@ -468,7 +572,7 @@ describe("content language server", () => {
             params: {
                 textDocument: {
                     uri: source,
-                    text: "See [[test-none-place-guild|Unsaved]] twice.\n",
+                    text: "See [[test-note-place-guild|Unsaved]] twice.\n",
                 },
             },
         });
@@ -718,7 +822,7 @@ describe("content language server", () => {
 
     it("searches indexed names, aliases, shortcodes, and tags once per note", () => {
         note("Alpha.md", "---\ntype: lore\nshortcode: alpha\n---\nÁlyra\n");
-        index([alpha, { ...alpha, type: "doclore" }]);
+        index([alpha, { ...alpha, type: "lore" }]);
         expect(workspace.symbols("alyra")).toHaveLength(1);
         expect(workspace.symbols("first light")).toHaveLength(1);
         expect(workspace.symbols("lore-alpha")).toHaveLength(1);
@@ -832,9 +936,9 @@ describe("content language server", () => {
         index([
             {
                 ...alpha,
-                type: "docaffiliation",
+                type: "affiliation",
                 shortcode: "guild",
-                address: { slug: "affiliation-guild", canonical: "test-none-docaffiliation-guild" },
+                address: { slug: "affiliation-guild", canonical: "test-note-affiliation-guild" },
                 file: { path: "Guild.md" },
             },
             {
