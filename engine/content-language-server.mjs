@@ -16,13 +16,14 @@ import {
     loadPackConfig,
 } from "@heroiclands/package-build/engine/pack-config";
 import { noteFile } from "@heroiclands/package-build/engine/index-records";
+import { asciiName } from "@heroiclands/package-build/engine/content-index";
 import { NOTE_VOCABULARY } from "@heroiclands/package-build/engine/note-vocabulary";
 import {
     languageIndexDirectory,
     readLanguageIndex,
     rebuildLanguageIndex,
 } from "./content-language-index.mjs";
-import { matchAllOutsideCode } from "@heroiclands/package-build/engine/code-fences";
+import { codeRegions, matchAllOutsideCode } from "@heroiclands/package-build/engine/code-fences";
 import { embedsIn, EMBED_DEFAULT_TYPE } from "@heroiclands/package-build/engine/content-embeds";
 
 const EMPTY_RANGE = { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } };
@@ -71,6 +72,41 @@ function noteName(record) {
     return typeof record.name === "string" ? record.name : (record.name?.full ?? record.shortcode);
 }
 
+/** Use the index generator's transliteration for both saved fields and typed queries. */
+function searchKey(value) {
+    return typeof value === "string" ? (asciiName(value) ?? "").toLowerCase() : "";
+}
+
+/** A completion item changes the Address text while its label remains readable. */
+function completionItem(label, detail, inserted, text, from, to, filterText) {
+    return {
+        label,
+        kind: 18,
+        detail,
+        filterText,
+        textEdit: {
+            range: { start: positionAt(text, from), end: positionAt(text, to) },
+            newText: inserted,
+        },
+    };
+}
+
+/** Ignore ordinary prose completion before loading any foreign project. */
+function mayCompleteAddress(text, offset) {
+    if (text == null || offset < 0) return false;
+    const bodyStart = text.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/)?.[0].length ?? 0;
+    if (offset < bodyStart) return true;
+    const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
+    const lineEnd = text.indexOf("\n", offset);
+    const before = text.slice(lineStart, offset);
+    const open = before.lastIndexOf("[[");
+    return (
+        open >= 0 &&
+        !before.slice(open + 2).includes("]]") &&
+        !text.slice(offset, lineEnd < 0 ? text.length : lineEnd).includes("]]")
+    );
+}
+
 /** An index read from the package's configured content tree. */
 export class ContentWorkspace {
     constructor(
@@ -90,6 +126,7 @@ export class ContentWorkspace {
         this.records = [];
         this.byAddress = new Map();
         this.byFile = new Map();
+        this.searchKeys = new Map();
         this.types = new Set(Object.keys(NOTE_VOCABULARY));
         this.documents = new Map();
         this.foreignRoots = [];
@@ -229,6 +266,7 @@ export class ContentWorkspace {
     loadRecords(records) {
         const byAddress = new Map();
         const byFile = new Map();
+        const searchKeys = new Map();
         const types = new Set(Object.keys(NOTE_VOCABULARY));
         for (const record of records) {
             if (record.type) types.add(record.type);
@@ -238,10 +276,26 @@ export class ContentWorkspace {
                 const file = noteFile(this.contentRoot, record);
                 if (!byFile.has(file)) byFile.set(file, record);
             }
+            searchKeys.set(record, [
+                ...new Set(
+                    [
+                        noteName(record),
+                        record.nameAscii,
+                        ...(record.name?.aliases ?? []),
+                        ...(record.aliasesAscii ?? []),
+                        record.shortcode,
+                        record.address?.slug,
+                        record.address?.canonical,
+                    ]
+                        .map(searchKey)
+                        .filter(Boolean),
+                ),
+            ]);
         }
         this.records = records;
         this.byAddress = byAddress;
         this.byFile = byFile;
+        this.searchKeys = searchKeys;
         this.types = types;
     }
 
@@ -340,6 +394,196 @@ export class ContentWorkspace {
                 if (record) return record;
             }
         return null;
+    }
+
+    /** Spell TARGET with the shortest suffix that resolves to that exact indexed owner. */
+    shortestAddress(target, owner, defaults, projects) {
+        const canonical = target.address?.canonical?.toLowerCase();
+        if (!canonical) return null;
+        const parts = canonical.split("-");
+        if (parts.length !== 4) return null;
+        const suffixes = [
+            ...(defaults.type ? [parts[3]] : []),
+            parts.slice(2).join("-"),
+            parts.slice(1).join("-"),
+            canonical,
+        ];
+        const vocabulary = {
+            package: this.config.contentPackage,
+            system: defaults.system ?? "none",
+            type: defaults.type,
+            types: new Set(projects.flatMap((project) => [...project.types])),
+            packages: new Set(projects.map((project) => project.config.contentPackage)),
+        };
+        for (const written of suffixes) {
+            const tuple = parseAddress(written, vocabulary);
+            if (tuple.reason || renderAddress(tuple) !== canonical) continue;
+            const owners = projects.filter((project) => project.byAddress.has(canonical));
+            if (owners.length === 1 && owners[0] === owner) return written;
+        }
+        return null;
+    }
+
+    /** Complete an unfinished wikilink using saved metadata and open-buffer context. */
+    linkCompletion(text, offset, projects) {
+        const bodyStart = text.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/)?.[0].length ?? 0;
+        if (offset < bodyStart) return null;
+        const body = text.slice(bodyStart);
+        const bodyOffset = offset - bodyStart;
+        if (
+            codeRegions(body).some(
+                (region) => region.start <= bodyOffset && bodyOffset <= region.end,
+            )
+        )
+            return null;
+        const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
+        const lineEnd = text.indexOf("\n", offset);
+        const before = text.slice(lineStart, offset);
+        const open = before.lastIndexOf("[[");
+        if (open < 0 || before.slice(open + 2).includes("]]")) return null;
+        if (text.slice(offset, lineEnd < 0 ? text.length : lineEnd).includes("]]")) return null;
+        const from = lineStart + open + 2;
+        const written = text.slice(from, offset);
+        if (written.includes("|") || written.includes("[") || written.includes("]")) return null;
+        const hash = written.indexOf("#");
+        if (hash < 0) return { kind: "address", from, to: offset, query: written, defaults: {} };
+        const target = this.resolve(written.slice(0, hash), {}, projects);
+        if (!target) return null;
+        return {
+            kind: "anchor",
+            target,
+            from: from + hash + 1,
+            to: offset,
+            query: written.slice(hash + 1),
+        };
+    }
+
+    /** Find the declared Address scalar or key containing the cursor. */
+    frontmatterCompletion(text, offset) {
+        const header = /^---\r?\n/.exec(text)?.[0];
+        if (!header) return null;
+        const closing = /\r?\n---(?:\r?\n|$)/g;
+        closing.lastIndex = header.length;
+        const end = closing.exec(text)?.index;
+        if (end == null || offset < header.length || offset > end) return null;
+        const yamlText = text.slice(header.length, end);
+        let document;
+        let frontmatter;
+        try {
+            document = YAML.parseDocument(yamlText);
+            frontmatter = document.toJS();
+        } catch {
+            return null;
+        }
+        if (!frontmatter || typeof frontmatter !== "object") return null;
+        const cursor = offset - header.length;
+        let found = null;
+        const scalar = (node, position) => {
+            if (!YAML.isScalar(node) || !node.range || found) return;
+            let [start, finish] = node.range;
+            const raw = yamlText.slice(start, finish);
+            if (
+                (raw.startsWith('"') && raw.endsWith('"')) ||
+                (raw.startsWith("'") && raw.endsWith("'"))
+            ) {
+                start += 1;
+                finish -= 1;
+            }
+            if (cursor < start || cursor > finish) return;
+            found = {
+                kind: "address",
+                from: header.length + start,
+                to: header.length + finish,
+                query: yamlText.slice(start, cursor),
+                defaults: { system: position.system ?? "none", type: position.type },
+                accepts: position.accepts ?? (position.type ? [position.type] : null),
+            };
+        };
+        const visit = (node, segments, position) => {
+            if (!node || found) return;
+            if (segments.length) {
+                const [head, ...tail] = segments;
+                if (YAML.isMap(node))
+                    for (const pair of node.items)
+                        if (head === "*" || String(pair.key?.value) === String(head))
+                            visit(pair.value, tail, position);
+                if (YAML.isSeq(node))
+                    node.items.forEach((child, index) => {
+                        if (head === "*" || String(index) === String(head))
+                            visit(child, tail, position);
+                    });
+                return;
+            }
+            if (position.shape === "keys" && YAML.isMap(node))
+                for (const pair of node.items) scalar(pair.key, position);
+            else if (position.shape === "list" && YAML.isSeq(node))
+                for (const child of node.items) scalar(child, position);
+            else if (position.shape === "scalar-or-map" && YAML.isMap(node))
+                for (const pair of node.items) scalar(pair.value, position);
+            else scalar(node, position);
+        };
+        for (const position of addressPositions(frontmatter, this.config)) {
+            visit(document.contents, position.path, position);
+            if (found) break;
+        }
+        return found;
+    }
+
+    completion(uri, position, projects = [this]) {
+        const text = this.text(uri);
+        if (text == null) return [];
+        const offset = offsetAt(text, position);
+        if (offset < 0) return [];
+        const context =
+            this.linkCompletion(text, offset, projects) ?? this.frontmatterCompletion(text, offset);
+        if (!context) return [];
+        const needle = searchKey(context.query);
+        if (context.kind === "anchor")
+            return (context.target.anchors ?? [])
+                .filter((anchor) => searchKey(`${anchor.slug} ${anchor.name}`).includes(needle))
+                .map((anchor) =>
+                    completionItem(
+                        anchor.slug,
+                        anchor.name,
+                        anchor.slug,
+                        text,
+                        context.from,
+                        context.to,
+                        context.query,
+                    ),
+                );
+        const items = [];
+        const seen = new Set();
+        for (const project of projects)
+            for (const record of project.records) {
+                const canonical = record.address?.canonical?.toLowerCase();
+                if (!canonical || project.byAddress.get(canonical) !== record) continue;
+                if (seen.has(canonical)) continue;
+                if (
+                    context.accepts &&
+                    !context.accepts.some(
+                        (accepted) => record.type === accepted || record.type === `doc${accepted}`,
+                    )
+                )
+                    continue;
+                if (!(project.searchKeys.get(record) ?? []).some((key) => key.includes(needle)))
+                    continue;
+                const inserted = this.shortestAddress(record, project, context.defaults, projects);
+                if (!inserted) continue;
+                seen.add(canonical);
+                items.push(
+                    completionItem(
+                        `${noteName(record)} — ${canonical}`,
+                        `${record.package} · ${canonical}`,
+                        inserted,
+                        text,
+                        context.from,
+                        context.to,
+                        context.query,
+                    ),
+                );
+            }
+        return items.sort((a, b) => a.label.localeCompare(b.label));
     }
 
     /** Link and declared frontmatter targets, with exact source ranges. */
@@ -610,6 +854,7 @@ export function respond(workspace, message) {
                     positionEncoding: "utf-16",
                     textDocumentSync: { openClose: true, change: 2, save: true },
                     definitionProvider: true,
+                    completionProvider: { triggerCharacters: ["[", "#", "-"] },
                     referencesProvider: true,
                     workspaceSymbolProvider: true,
                     workspace: {
@@ -664,6 +909,13 @@ export function respond(workspace, message) {
         }
         case "textDocument/definition":
             return workspace.definition(params.textDocument.uri, params.position);
+        case "textDocument/completion": {
+            const text = workspace.text(params.textDocument.uri);
+            if (!mayCompleteAddress(text, offsetAt(text ?? "", params.position))) return [];
+            const projects = workspace.indexedWorkspaces(true);
+            const source = workspace.sourceWorkspace(params.textDocument.uri, projects);
+            return source.completion(params.textDocument.uri, params.position, projects);
+        }
         case "textDocument/references":
             return workspace.references(params.textDocument.uri, params.position);
         case "workspace/symbol":

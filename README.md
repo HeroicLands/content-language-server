@@ -1,6 +1,6 @@
 # HeroicLands content language server
 
-`@heroiclands/content-language-server` provides definition, reference, and workspace search for Markdown notes in HeroicLands content projects. It reads authored notes and project configuration through one exact `@heroiclands/package-build` dependency.
+`@heroiclands/content-language-server` provides definition, reference, completion, and workspace search for Markdown notes in HeroicLands content projects. It reads authored notes and project configuration through one exact `@heroiclands/package-build` dependency.
 
 Start its `heroiclands-content-language-server` executable from the content project root. The server builds a private index when it starts and after saves. The index lives in the platform cache outside the project's `build/` directory, so a clean or package build does not replace editor navigation data.
 
@@ -9,5 +9,7 @@ Install an exact released package version in a directory managed by your editor 
 See the [language server guide](docs/content-language-server.md) for LSP requests, cache locations, error handling, and manual recovery commands.
 
 Editors can pass explicit foreign content roots in LSP initialization options. A normal workspace-symbol query stays in the current project; an `all:` query searches the configured roots as well. The server returns standard LSP symbols and locations, so the editor controls how results are presented.
+
+Completion searches anywhere in indexed names, aliases, and Addresses. It inserts the shortest Address that identifies the selected target in the current note, including its system or package when needed. Clients receive standard LSP completion items with exact text edits.
 
 Maintainers use the [publishing guide](docs/publishing.md) for the first npm release and trusted publisher configuration.
