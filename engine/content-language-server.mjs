@@ -9,7 +9,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import YAML from "yaml";
 import { parseAddress, renderAddress } from "@heroiclands/package-build/engine/address";
 import { addressPositions } from "@heroiclands/package-build/engine/note-addresses";
-import { parseWikilink, WIKILINK } from "@heroiclands/package-build/engine/wikilink-syntax";
+import {
+    linkFindingMessage,
+    parseWikilink,
+    WIKILINK,
+} from "@heroiclands/package-build/engine/wikilink-syntax";
 import {
     CONFIG_FILENAMES,
     configFromData,
@@ -137,7 +141,13 @@ function mayCompleteAddress(text, offset) {
 export class ContentWorkspace {
     constructor(
         config = loadPackConfig(),
-        { cacheBase, onStatus = () => {}, loadProjectConfig = loadForeignConfig } = {},
+        {
+            cacheBase,
+            onStatus = () => {},
+            onDiagnostics = () => {},
+            onIndexChanged,
+            loadProjectConfig = loadForeignConfig,
+        } = {},
     ) {
         this.config = config;
         this.cacheBase = cacheBase;
@@ -149,6 +159,9 @@ export class ContentWorkspace {
         this.started = false;
         this.rebuildTimer = null;
         this.onStatus = onStatus;
+        this.onDiagnostics = onDiagnostics;
+        this.onIndexChanged = onIndexChanged ?? (() => this.publishOpenDiagnostics());
+        this.diagnosticTimers = new Map();
         this.records = [];
         this.byAddress = new Map();
         this.byFile = new Map();
@@ -188,6 +201,7 @@ export class ContentWorkspace {
                 if (message) this.onStatus(config.contentPackage + ": " + message);
             },
             loadProjectConfig: this.loadProjectConfig,
+            onIndexChanged: () => this.publishOpenDiagnostics(),
         });
         project.documents = this.documents;
         this.foreign.set(root, project);
@@ -295,6 +309,7 @@ export class ContentWorkspace {
         const records = readLanguageIndex(this.cacheDirectory, this.config.contentPackage);
         this.loadRecords(records);
         this.indexState = state;
+        this.onIndexChanged();
         return true;
     }
 
@@ -341,6 +356,7 @@ export class ContentWorkspace {
             const stat = fs.statSync(path.join(this.cacheDirectory, "metadata.json"));
             this.indexState = `${stat.mtimeMs}:${stat.size}`;
             this.onStatus(null);
+            this.onIndexChanged();
             return true;
         } catch (error) {
             let stale = this.records.length > 0;
@@ -381,6 +397,8 @@ export class ContentWorkspace {
     close() {
         if (this.rebuildTimer) clearTimeout(this.rebuildTimer);
         this.rebuildTimer = null;
+        for (const timer of this.diagnosticTimers.values()) clearTimeout(timer);
+        this.diagnosticTimers.clear();
         for (const project of this.foreign.values()) project.close();
     }
 
@@ -633,7 +651,13 @@ export class ContentWorkspace {
     }
 
     /** Link and declared frontmatter targets, with exact source ranges. */
-    referencesInText(text, file, projects = [this], includeFrontmatter = true) {
+    referencesInText(
+        text,
+        file,
+        projects = [this],
+        includeFrontmatter = true,
+        includeUnresolved = false,
+    ) {
         const found = [];
         const bodyStart = text.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/)?.[0].length ?? 0;
         const linkText = text.slice(bodyStart);
@@ -642,13 +666,15 @@ export class ContentWorkspace {
             const parsed = parseWikilink(match[1]);
             const record =
                 parsed.target ? this.resolve(parsed.target, {}, projects) : this.byFile.get(file);
-            if (!record) continue;
+            if (!record && !includeUnresolved) continue;
             const start = bodyStart + match.index + (parsed.target ? 2 : 3);
             found.push({
                 record,
                 anchor: parsed.anchor,
                 written: parsed.target,
                 defaults: {},
+                kind: "link",
+                labelled: parsed.labelled,
                 location: location(
                     file,
                     text,
@@ -660,13 +686,15 @@ export class ContentWorkspace {
         for (const embed of embedsIn(linkText)) {
             const defaults = { system: "none", type: EMBED_DEFAULT_TYPE };
             const record = this.resolve(embed.written, defaults, projects);
-            if (!record) continue;
+            if (!record && !includeUnresolved) continue;
             const start = bodyStart + embed.index + 3;
             found.push({
                 record,
                 anchor: "",
                 written: embed.written,
                 defaults,
+                kind: "embed",
+                labelled: embed.labelled,
                 location: location(file, text, start, start + embed.written.length),
             });
         }
@@ -706,13 +734,15 @@ export class ContentWorkspace {
                     type: position.type,
                 };
                 const record = this.resolve(value, defaults, projects);
-                if (!record) return;
+                if (!record && !includeUnresolved) return;
                 const start = yamlStart + part.range[0];
                 found.push({
                     record,
                     anchor: "",
                     written: value,
                     defaults,
+                    kind: "frontmatter",
+                    accepts: position.accepts,
                     location: location(file, text, start, yamlStart + part.range[1]),
                 });
             };
@@ -726,9 +756,131 @@ export class ContentWorkspace {
                 scalar(node, node.value);
             }
         };
-        for (const position of addressPositions(frontmatter))
+        for (const position of addressPositions(frontmatter, this.config))
             visit(document.contents, position.path, position);
         return found;
+    }
+
+    /** Validate complete references using live ranges and saved target metadata. */
+    diagnostics(uri) {
+        const text = this.text(uri);
+        if (text == null) return [];
+        let projects;
+        let localIndexAvailable = true;
+        try {
+            projects = this.indexedWorkspaces(true);
+        } catch {
+            projects = [this];
+            localIndexAvailable = false;
+        }
+        const source = this.sourceWorkspace(uri, projects);
+        const declarations = ["systems", "requires", "recommends"]
+            .flatMap((key) => source.config.relationships?.[key] ?? [])
+            .map((entry) => [entry.contentPackage ?? entry.id, entry]);
+        const dependencies = new Map(declarations);
+        const available = new Set(projects.map((project) => project.config.contentPackage));
+        if (!localIndexAvailable) available.delete(this.config.contentPackage);
+        const types = new Set(projects.flatMap((project) => [...project.types]));
+        const candidates = source.referencesInText(text, fileURLToPath(uri), projects, true, true);
+        const diagnostics = [];
+        for (const candidate of candidates) {
+            const { written, defaults, record, anchor, kind, accepts, labelled } = candidate;
+            const target = written || `#${anchor}`;
+            let reason = null;
+            let message = null;
+            let severity = 1;
+            if (kind !== "frontmatter" && !labelled) reason = "unlabelled";
+            else {
+                const tuple =
+                    written ?
+                        parseAddress(
+                            written,
+                            {
+                                package: source.config.contentPackage,
+                                system: defaults.system ?? "note",
+                                type: defaults.type,
+                                types,
+                            },
+                            { declared: true },
+                        )
+                    :   null;
+                const targetPackage = tuple?.package ?? source.config.contentPackage;
+                const dependency = dependencies.get(targetPackage);
+                if (tuple?.reason)
+                    reason =
+                        ["unknown-type", "not-lowercase"].includes(tuple.reason) ?
+                            tuple.reason
+                        :   "not-an-address";
+                else if (targetPackage !== source.config.contentPackage && !dependency)
+                    message = `Address ${target} names ${targetPackage}, which is not a declared content dependency`;
+                else if (dependency?.contentIndex === false) reason = "no-content-index";
+                else if (!available.has(targetPackage)) {
+                    severity = 2;
+                    message = `Content index for ${targetPackage} is unavailable; ${target} cannot be checked`;
+                } else if (!record) reason = "unresolved";
+                else if (kind === "embed" && !ASSET_TYPE_NAMES.has(record.type))
+                    reason = "not-an-asset";
+                else if (
+                    accepts?.length &&
+                    !accepts.some((type) => record.type === type || record.type === `doc${type}`)
+                )
+                    message = `Address ${target} targets ${record.type}, but this field accepts ${accepts.join(", ")}`;
+                else if (
+                    kind === "frontmatter" &&
+                    !accepts?.length &&
+                    defaults.type &&
+                    record.type !== defaults.type
+                )
+                    message = `Address ${target} targets ${record.type}, but this field accepts ${defaults.type}`;
+                else if (
+                    anchor &&
+                    !record.anchors?.some(
+                        (entry) => entry.slug.toLowerCase() === anchor.toLowerCase(),
+                    )
+                )
+                    reason = "unknown-anchor";
+            }
+            if (reason)
+                message = linkFindingMessage({
+                    reason,
+                    target,
+                    anchor,
+                    type: record?.type,
+                });
+            if (message)
+                diagnostics.push({
+                    range: candidate.location.range,
+                    severity,
+                    source: "heroiclands",
+                    message,
+                });
+        }
+        return diagnostics.sort(
+            (a, b) =>
+                a.range.start.line - b.range.start.line ||
+                a.range.start.character - b.range.start.character,
+        );
+    }
+
+    scheduleDiagnostics(uri) {
+        if (this.diagnosticTimers.has(uri)) clearTimeout(this.diagnosticTimers.get(uri));
+        this.diagnosticTimers.set(
+            uri,
+            setTimeout(() => {
+                this.diagnosticTimers.delete(uri);
+                if (this.documents.has(uri)) this.onDiagnostics(uri, this.diagnostics(uri));
+            }, 300),
+        );
+    }
+
+    publishOpenDiagnostics() {
+        for (const uri of this.documents.keys()) this.scheduleDiagnostics(uri);
+    }
+
+    clearDiagnostics(uri) {
+        if (this.diagnosticTimers.has(uri)) clearTimeout(this.diagnosticTimers.get(uri));
+        this.diagnosticTimers.delete(uri);
+        this.onDiagnostics(uri, []);
     }
 
     targetAt(uri, position, projects = [this]) {
@@ -922,9 +1074,11 @@ export function respond(workspace, message) {
         case "workspace/didChangeConfiguration":
             if (params.settings?.heroiclands?.foreignRoots)
                 workspace.configureForeignRoots(params.settings.heroiclands.foreignRoots);
+            workspace.publishOpenDiagnostics();
             return undefined;
         case "textDocument/didOpen":
             workspace.documents.set(params.textDocument.uri, params.textDocument.text);
+            workspace.scheduleDiagnostics(params.textDocument.uri);
             return undefined;
         case "textDocument/didChange": {
             const uri = params.textDocument.uri;
@@ -938,13 +1092,16 @@ export function respond(workspace, message) {
                 }
             }
             workspace.documents.set(uri, text);
+            workspace.scheduleDiagnostics(uri);
             return undefined;
         }
         case "textDocument/didClose":
             workspace.documents.delete(params.textDocument.uri);
+            workspace.clearDiagnostics(params.textDocument.uri);
             return undefined;
         case "textDocument/didSave":
             workspace.scheduleRebuildForUri(params.textDocument.uri);
+            workspace.scheduleDiagnostics(params.textDocument.uri);
             return undefined;
         case "workspace/didChangeWatchedFiles":
         case "workspace/didCreateFiles":
@@ -995,6 +1152,12 @@ export function runLanguageServer(
                 params: { type: 1, message: status },
             });
     };
+    workspace.onDiagnostics = (uri, diagnostics) =>
+        send({
+            jsonrpc: "2.0",
+            method: "textDocument/publishDiagnostics",
+            params: { uri, diagnostics },
+        });
     input.on("data", (chunk) => {
         pending = Buffer.concat([pending, chunk]);
         while (true) {

@@ -1,6 +1,6 @@
 # Content language server
 
-`heroiclands-content-language-server` provides editor navigation for Markdown notes in a HeroicLands content project. It is a stdio Language Server Protocol process. Start it from the project root so it can read `package-build.config.yaml` and the saved content tree.
+`heroiclands-content-language-server` provides editor navigation and reference diagnostics for Markdown notes in a HeroicLands content project. It is a stdio Language Server Protocol process. Start it from the project root so it can read `package-build.config.yaml` and the saved content tree.
 
 The server builds a private JSONL index during initialization, before answering navigation requests. It rebuilds after nearby save notifications settle. Unsaved buffer text identifies an Address under the cursor, but workspace search uses saved metadata. A new, renamed, or deleted note enters the index when the editor sends a save or file-operation notification. A successful rebuild replaces the complete snapshot; a failed rebuild reports an editor message and keeps the last complete snapshot available with a stale-results warning.
 
@@ -17,14 +17,23 @@ heroiclands-content-language-server --rebuild-index
 
 The first prints the private JSONL path. The second is manual recovery when a file operation did not trigger a rebuild; it prints the path on success and exits nonzero on failure. Restarting the server also rebuilds from saved source. A failed rebuild leaves the complete prior snapshot in place. If there is no valid prior snapshot, navigation reports that no index is available.
 
-| LSP request               | Behavior                                                                                                                                              |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `textDocument/definition` | Follows an Address or wikilink to the indexed note. An anchor lands on its indexed line.                                                              |
-| `textDocument/completion` | Completes unfinished wikilinks, anchors, and declared frontmatter Address values or keys.                                                             |
-| `workspace/symbol`        | Finds notes by name, alias, ASCII name, shortcode, or Address. Field and project prefixes narrow the saved index. One result appears per source note. |
-| `textDocument/references` | Finds authored wikilinks, embeds, and declared frontmatter Address values or keys. Ordinary prose is excluded.                                        |
+| LSP request                       | Behavior                                                                                                                                              |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `textDocument/definition`         | Follows an Address or wikilink to the indexed note. An anchor lands on its indexed line.                                                              |
+| `textDocument/completion`         | Completes unfinished wikilinks, anchors, and declared frontmatter Address values or keys.                                                             |
+| `workspace/symbol`                | Finds notes by name, alias, ASCII name, shortcode, or Address. Field and project prefixes narrow the saved index. One result appears per source note. |
+| `textDocument/references`         | Finds authored wikilinks, embeds, and declared frontmatter Address values or keys. Ordinary prose is excluded.                                        |
+| `textDocument/publishDiagnostics` | Reports invalid complete links, embeds, anchors, and declared frontmatter Address targets in open notes.                                              |
 
 Reference search uses indexed frontmatter to select candidates and reads saved Markdown source for exact ranges and body links. Unsaved edits identify the target under the cursor but do not enter workspace search. The server writes only LSP messages to stdout and uses UTF-16 positions.
+
+### Reference diagnostics
+
+The server checks a complete `[[Address|Text]]` link, `![[Address|Text]]` embed, or declared frontmatter Address against the saved private index. It checks section anchors against indexed headings and accepts only icon, image, or audio assets in embeds. A missing label, unresolved target, wrong target type, or missing anchor produces a finding at the written Address. Fenced code and unfinished links produce no reference finding. Ordinary prose and frontmatter fields that are not declared as Addresses are outside this check.
+
+Open buffer text supplies the exact source positions, including UTF-16 offsets for non-ASCII text. The index supplies target metadata; unsaved edits in another note do not change resolution. The server waits 300 milliseconds after the latest edit before publishing diagnostics, then checks again after a save or index rebuild. Closing a document clears its findings.
+
+An explicitly configured foreign project can be searched even when it is not a declared build dependency. A reference to that project's content is diagnosed until the citing package declares the dependency in `package-build.config.yaml`. When a declared foreign package's index is unavailable, the diagnostic says the index is unavailable; it does not claim the target is missing. A dependency with `contentIndex: false` cannot provide content targets.
 
 ### Address completion
 
@@ -67,4 +76,4 @@ Plain `workspace/symbol` queries search names, aliases, shortcodes, and Addresse
 
 ## Editor integration
 
-An LSP client starts the executable with the content project as its working directory and associates it with Markdown notes under the configured content directory. The process handles `initialize`, `shutdown`, `exit`, full and incremental document synchronization, save and file-operation notifications, configuration changes, definition, completion, references, and workspace symbols. It does not advertise diagnostics, rename, or document symbols. An editor integration supplies its own installation, project discovery, and UI commands.
+An LSP client starts the executable with the content project as its working directory and associates it with Markdown notes under the configured content directory. The process handles `initialize`, `shutdown`, `exit`, full and incremental document synchronization, save and file-operation notifications, configuration changes, definition, completion, references, diagnostics, and workspace symbols. It does not advertise rename or document symbols. An editor integration supplies its own installation, project discovery, and UI commands.

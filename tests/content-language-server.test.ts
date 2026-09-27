@@ -125,6 +125,131 @@ function foreignProject(contentPackage = "other") {
 }
 
 describe("content language server", () => {
+    it("locates broken body links and embeds while leaving valid, incomplete, and fenced text quiet", () => {
+        const text =
+            "😀 [[lore-missing|Lost]] [[lore-alpha#absent|Section]] [[lore-alpha#history|OK]]\n" +
+            "![[lore-alpha|Portrait]] ![[image-camel|Camel]] [[unfinished\n" +
+            "```md\n[[lore-missing|Code]]\n```\n[[lore-missing|Again]]\n";
+        const source = note("Source.md", text);
+        index([
+            alpha,
+            { ...alpha, address: { canonical: "test-none-lore-alpha" } },
+            {
+                package: "test",
+                type: "image",
+                shortcode: "camel",
+                address: { canonical: "test-none-image-camel" },
+                asset: { path: "images/camel.webp" },
+            },
+        ]);
+        const found = workspace.diagnostics(source);
+        expect(found).toHaveLength(4);
+        expect(found.map((item) => item.range.start)).toEqual([
+            { line: 0, character: 5 },
+            { line: 0, character: 27 },
+            { line: 1, character: 3 },
+            { line: 5, character: 2 },
+        ]);
+        expect(found.map((item) => item.message)).toEqual([
+            expect.stringContaining("lore-missing"),
+            expect.stringContaining("#absent"),
+            expect.stringContaining("only an `icon`, an `image` or an `audio`"),
+            expect.stringContaining("lore-missing"),
+        ]);
+    });
+
+    it("checks declared frontmatter address values and map keys", () => {
+        const source = note(
+            "Source.md",
+            "---\nshortcode: source\ntype: affiliation\ndata:\n  relations:\n    lore-missing: friendly\n---\n",
+        );
+        index([alpha]);
+        const found = workspace.diagnostics(source);
+        expect(found).toHaveLength(1);
+        expect(found[0].range.start).toEqual({ line: 5, character: 4 });
+    });
+
+    it("checks declared frontmatter asset values with the none default", () => {
+        const source = note(
+            "Source.md",
+            "---\nshortcode: source\ntype: being\ndata:\n  icon: missing\n---\n",
+        );
+        index([alpha]);
+        const found = workspace.diagnostics(source);
+        expect(found).toHaveLength(1);
+        expect(found[0].range).toEqual({
+            start: { line: 4, character: 8 },
+            end: { line: 4, character: 15 },
+        });
+    });
+
+    it("distinguishes undeclared foreign content from an unavailable declared index", () => {
+        const foreign = foreignProject();
+        const source = note("Source.md", "[[other-note-lore-alpha|Foreign]]\n");
+        index([alpha]);
+        workspace.configureForeignRoots([foreign.directory]);
+        const remote = workspace.foreignWorkspace(foreign.directory);
+        indexFor(remote, [
+            { ...alpha, package: "other", address: { canonical: "other-note-lore-alpha" } },
+        ]);
+        expect(workspace.diagnostics(source)[0].message).toContain(
+            "not a declared content dependency",
+        );
+        workspace.config.relationships = { requires: [{ id: "other" }] } as any;
+        expect(workspace.diagnostics(source)).toEqual([]);
+        workspace.configureForeignRoots([]);
+        const unavailable = workspace.diagnostics(source);
+        expect(unavailable).toHaveLength(1);
+        expect(unavailable[0].severity).toBe(2);
+        expect(unavailable[0].message).toContain("unavailable");
+    });
+
+    it("publishes debounced diagnostics from unsaved edits and clears them on close", () => {
+        vi.useFakeTimers();
+        const source = note("Source.md", "[[lore-alpha|OK]]\n");
+        index([alpha]);
+        const published: { uri: string; diagnostics: any[] }[] = [];
+        workspace.onDiagnostics = (uri, diagnostics) => published.push({ uri, diagnostics });
+        respond(workspace, {
+            method: "textDocument/didOpen",
+            params: { textDocument: { uri: source, text: "[[lore-alpha|OK]]\n" } },
+        });
+        respond(workspace, {
+            method: "textDocument/didChange",
+            params: {
+                textDocument: { uri: source },
+                contentChanges: [{ text: "[[lore-missing|Lost]]\n" }],
+            },
+        });
+        vi.advanceTimersByTime(299);
+        expect(published).toEqual([]);
+        vi.advanceTimersByTime(1);
+        expect(published[0].diagnostics).toHaveLength(1);
+        respond(workspace, {
+            method: "textDocument/didClose",
+            params: { textDocument: { uri: source } },
+        });
+        expect(published.at(-1)).toEqual({ uri: source, diagnostics: [] });
+    });
+
+    it("rechecks open notes when a saved index refreshes", () => {
+        vi.useFakeTimers();
+        const source = note("Source.md", "[[lore-alpha|Known]]\n");
+        index([alpha]);
+        const published: any[][] = [];
+        workspace.onDiagnostics = (_uri, diagnostics) => published.push(diagnostics);
+        respond(workspace, {
+            method: "textDocument/didOpen",
+            params: { textDocument: { uri: source, text: "[[lore-alpha|Known]]\n" } },
+        });
+        vi.advanceTimersByTime(300);
+        expect(published.at(-1)).toEqual([]);
+        index([]);
+        workspace.refresh();
+        vi.advanceTimersByTime(300);
+        expect(published.at(-1)).toHaveLength(1);
+    });
+
     it("uses note for wikilinks and none for embedded asset completion", () => {
         const source = note("Source.md", "[[camel");
         index([
@@ -1045,5 +1170,28 @@ describe("content language server", () => {
         input.write(frame.slice(9));
         expect(reply).toContain('"id":1');
         expect(reply).toContain('"name":"Ályra"');
+    });
+
+    it("sends publishDiagnostics notifications for open notes", () => {
+        vi.useFakeTimers();
+        index([alpha]);
+        const source = note("Source.md", "[[lore-missing|Lost]]\n");
+        const input = new PassThrough();
+        const output = new PassThrough();
+        let reply = "";
+        output.on("data", (chunk) => {
+            reply += chunk.toString();
+        });
+        runLanguageServer(input, output, workspace);
+        const body = JSON.stringify({
+            jsonrpc: "2.0",
+            method: "textDocument/didOpen",
+            params: { textDocument: { uri: source, text: "[[lore-missing|Lost]]\n" } },
+        });
+        input.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+        expect(reply).not.toContain("publishDiagnostics");
+        vi.advanceTimersByTime(300);
+        expect(reply).toContain('"method":"textDocument/publishDiagnostics"');
+        expect(reply).toContain('"severity":1');
     });
 });
