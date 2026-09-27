@@ -130,10 +130,11 @@ function mayCompleteAddress(text, offset) {
     const lineEnd = text.indexOf("\n", offset);
     const before = text.slice(lineStart, offset);
     const open = before.lastIndexOf("[[");
+    const after = text.slice(offset, lineEnd < 0 ? text.length : lineEnd);
     return (
         open >= 0 &&
         !before.slice(open + 2).includes("]]") &&
-        !text.slice(offset, lineEnd < 0 ? text.length : lineEnd).includes("]]")
+        (!after.includes("]]") || after.startsWith("]]"))
     );
 }
 
@@ -495,7 +496,8 @@ export class ContentWorkspace {
         const open = before.lastIndexOf("[[");
         if (open < 0 || before.slice(open + 2).includes("]]")) return null;
         const embed = open > 0 && before[open - 1] === "!";
-        if (text.slice(offset, lineEnd < 0 ? text.length : lineEnd).includes("]]")) return null;
+        const after = text.slice(offset, lineEnd < 0 ? text.length : lineEnd);
+        if (after.includes("]]") && !after.startsWith("]]")) return null;
         const from = lineStart + open + 2;
         const written = text.slice(from, offset);
         if (written.includes("|") || written.includes("[") || written.includes("]")) return null;

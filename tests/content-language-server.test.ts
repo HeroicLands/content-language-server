@@ -454,6 +454,56 @@ describe("content language server", () => {
         ).toEqual([]);
     });
 
+    it("completes inside editor-paired wikilinks without replacing the closing brackets", () => {
+        const source = note("Source.md", "[[]]");
+        index([alpha]);
+        const empty = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 0, character: 2 } },
+        }) as any[];
+        expect(empty).toHaveLength(1);
+        expect(empty[0].textEdit).toMatchObject({
+            range: {
+                start: { line: 0, character: 2 },
+                end: { line: 0, character: 2 },
+            },
+            newText: "lore-alpha",
+        });
+        respond(workspace, {
+            method: "textDocument/didChange",
+            params: {
+                textDocument: { uri: source },
+                contentChanges: [{ text: "[[light]]" }],
+            },
+        });
+        const named = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 0, character: 7 } },
+        }) as any[];
+        expect(named).toHaveLength(1);
+        expect(named[0].textEdit.range.end.character).toBe(7);
+        expect(named[0].textEdit.newText).toBe("lore-alpha");
+        respond(workspace, {
+            method: "textDocument/didChange",
+            params: {
+                textDocument: { uri: source },
+                contentChanges: [{ text: "[[lore-alpha#his]]" }],
+            },
+        });
+        const anchors = respond(workspace, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 0, character: 16 } },
+        }) as any[];
+        expect(anchors).toHaveLength(1);
+        expect(anchors[0].textEdit).toMatchObject({
+            range: {
+                start: { line: 0, character: 13 },
+                end: { line: 0, character: 16 },
+            },
+            newText: "history",
+        });
+    });
+
     it("does not load foreign indexes for completion in ordinary prose", () => {
         const source = note("Source.md", "Plain prose.\n");
         index([alpha]);
