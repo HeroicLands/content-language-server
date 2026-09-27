@@ -1,5 +1,11 @@
 # @heroiclands/content-language-server
 
+## 0.2.1
+
+### Patch Changes
+
+Address completion works when an editor automatically inserts the closing brackets of a wikilink.
+
 ## 0.2.0
 
 ### Minor Changes
