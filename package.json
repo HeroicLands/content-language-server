@@ -1,6 +1,6 @@
 {
     "name": "@heroiclands/content-language-server",
-    "version": "0.2.1",
+    "version": "0.2.2",
     "description": "Language server for HeroicLands content projects",
     "license": "GPL-3.0-or-later",
     "type": "module",

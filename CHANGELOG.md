@@ -1,5 +1,11 @@
 # @heroiclands/content-language-server
 
+## 0.2.2
+
+### Patch Changes
+
+Address completion identifies exact name and alias matches so editors can preserve the intended link text.
+
 ## 0.2.1
 
 ### Patch Changes
