@@ -418,6 +418,50 @@ describe("content language server", () => {
         expect(items.every((item) => item.textEdit.range.start.character === 6)).toBe(true);
     });
 
+    it("marks exact names and aliases for editor display while retaining target identity", () => {
+        const source = note("Source.md", "[[First Light");
+        index([
+            alpha,
+            {
+                ...alpha,
+                package: "test",
+                shortcode: "beta",
+                name: { full: "Another Light", aliases: ["First Light"] },
+                address: { slug: "lore-beta", canonical: "test-note-lore-beta" },
+                file: { path: "Beta.md" },
+            },
+        ]);
+        const complete = (query: string) => {
+            respond(workspace, {
+                method: "textDocument/didChange",
+                params: {
+                    textDocument: { uri: source },
+                    contentChanges: [{ text: `[[${query}` }],
+                },
+            });
+            return respond(workspace, {
+                method: "textDocument/completion",
+                params: {
+                    textDocument: { uri: source },
+                    position: { line: 0, character: query.length + 2 },
+                },
+            }) as any[];
+        };
+        expect(complete("First Light").map((item) => item.data)).toEqual([
+            { address: "test-note-lore-alpha", display: "First Light", exact: true },
+            { address: "test-note-lore-beta", display: "First Light", exact: true },
+        ]);
+        expect(complete("Alyra")[0].data).toEqual({
+            address: "test-note-lore-alpha",
+            display: "Ályra",
+            exact: true,
+        });
+        expect(complete("Light").map((item) => item.data)).toEqual([
+            { address: "test-note-lore-alpha", display: "Ályra", exact: false },
+            { address: "test-note-lore-beta", display: "Another Light", exact: false },
+        ]);
+    });
+
     it("completes an empty link and a qualified Address without editing a closed link", () => {
         const source = note("Source.md", "[[");
         index([alpha, alpha]);
