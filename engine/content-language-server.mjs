@@ -82,6 +82,15 @@ function searchKey(value) {
     return typeof value === "string" ? (asciiName(value) ?? "").toLowerCase() : "";
 }
 
+/** Preserve the authored spelling when a query exactly names a note or alias. */
+function completionDisplay(record, query) {
+    const full = noteName(record);
+    const needle = searchKey(query);
+    const names = [full, ...(record.name?.aliases ?? [])];
+    const exact = needle ? names.find((name) => searchKey(name) === needle) : null;
+    return { display: exact ?? full, exact: Boolean(exact) };
+}
+
 /** Parse editor symbol filters without looking outside configured projects. */
 function symbolQuery(query) {
     let text = String(query ?? "").trim();
@@ -108,12 +117,13 @@ function symbolQuery(query) {
 }
 
 /** A completion item changes the Address text while its label remains readable. */
-function completionItem(label, detail, inserted, text, from, to, filterText) {
+function completionItem(label, detail, inserted, text, from, to, filterText, data) {
     return {
         label,
         kind: 18,
         detail,
         filterText,
+        ...(data ? { data } : {}),
         textEdit: {
             range: { start: positionAt(text, from), end: positionAt(text, to) },
             newText: inserted,
@@ -646,6 +656,10 @@ export class ContentWorkspace {
                         context.from,
                         context.to,
                         context.query,
+                        {
+                            address: canonical,
+                            ...completionDisplay(record, context.query),
+                        },
                     ),
                 );
             }
