@@ -21,7 +21,7 @@
         "changeset:version": "changeset version && npm install --package-lock-only"
     },
     "dependencies": {
-        "@heroiclands/package-build": "22.15.1",
+        "@heroiclands/package-build": "22.22.0",
         "yaml": "^2.8.1"
     },
     "devDependencies": {
