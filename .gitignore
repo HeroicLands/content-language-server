@@ -1,4 +1,91 @@
-node_modules/
-coverage/
+# Declaration output. Regenerated from the JSDoc by `npm run build:types`, which
+# `prepack` runs, so the published tarball carries them and the tree does not.
 types/
+
+# This package's own content index. Derived from `assets/` by
+# `npm run build:asset-index`, which `prepack` runs, so the published tarball
+# carries it and the tree does not — a build inside this process walks the tree
+# instead and never reads the file.
+/packagebuild-metadata.jsonl
+
+# Build dir
+/build/
+
+# Compressed packages
+*.tgz
+
+# Dependency directories.
+#
+# No trailing slash, and not anchored to the root. The trailing slash matched a
+# *directory* only, so when a worktree carried `node_modules` as a **symlink**
+# to another checkout, git did not ignore it and a `git add -A` committed it —
+# a 120000 blob holding one developer's absolute path. Every release from
+# 2026-09-11 then failed, because the release job installs, and the changesets
+# action's `git reset --hard` afterwards restores the symlink over the top of
+# the install, leaving every module unresolvable on a machine where that path
+# does not exist.
+#
+# Unanchored so the same thing cannot happen one directory down, which is where
+# the symlink came from: a nested worktree.
+node_modules
+
+# dotenv environment variables file
+/.env
+/.env.test
+/.env.local
+
+# AI
+/.claude/
+CLAUDE.md
+AI.md
+
+# IDE and editor config — per-user; never commit one contributor's editor setup
+# (project-wide policy like Prettier/ESLint config stays tracked; it's not IDE-specific)
+# VS Code (incl. recommended-extensions and settings)
+/.vscode/
+/*.code-workspace
+# JetBrains IDEs (IntelliJ IDEA, WebStorm, etc.) and Fleet
+/.idea/
+/.fleet/
+# Zed
+/.zed/
+# Sublime Text (project + workspace)
+*.sublime-workspace
+*.sublime-project
+# Vim / Neovim
+*.swp
+*.swo
+Session.vim
+.netrwhist
+# Emacs (backups, auto-save, lock files)
+*~
+\#*\#
+.\#*
+
+# GitHub
+.github/copilot-instructions.md
+
+# macOS specific files
+# general
 .DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Hidden files
+/nogit/
+*.wip
+
+# Coverage output
+coverage/
