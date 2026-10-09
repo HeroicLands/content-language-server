@@ -1,0 +1,21 @@
+name: Version and Tag
+
+# Releasing is gated by the repository variable HL_RELEASE_ENABLED. This opens
+# the Version Packages pull request and, once it merges, tags the version
+# commit. It never publishes: the push mirror carries the tag to GitHub, where
+# `.github/workflows/release.yml` publishes to npm and creates the Release.
+
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    release:
+        uses: HeroicLands/.github/.gitea/workflows/release-npm-package.yml@main
+        # By name, never `secrets: inherit`.
+        secrets:
+            RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}

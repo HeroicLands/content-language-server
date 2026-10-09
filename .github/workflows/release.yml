@@ -1,73 +1,181 @@
 name: Publish to npm
 
+# Publishes the version a `v<version>` tag names, then creates its GitHub
+# Release. Versioning and tagging happen on Gitea, the primary forge:
+# `.gitea/workflows/release.yml` opens the Version Packages pull request and,
+# once it merges, pushes the tag at the version commit. The push mirror carries
+# the tag here, and this workflow runs on that tag push. It is the only workflow
+# in this directory that runs on a push, and it never runs for a branch.
+#
+# The file name is load-bearing. npm Trusted Publishing binds the publisher to
+# the repository `HeroicLands/content-language-server` and the workflow file
+# `release.yml`, with no environment, so renaming the file or adding a job
+# `environment:` revokes the credential until the trusted publisher is
+# reconfigured on npm. The publisher does not constrain the ref, so a tag run
+# publishes exactly as a branch run would. There is no NPM_TOKEN.
+#
+# Every run is safe to repeat. The tag must name a commit on `main` and match
+# the version its `package.json` declares; a version npm already has is not
+# published again; a Release that exists is not recreated.
 on:
     push:
-        branches: [main]
+        tags: ["v*"]
+    # Recovery: run against the tag (`--ref v<version>`) to finish a release
+    # whose publish or Release step failed. A run on a branch does nothing.
     workflow_dispatch:
 
 permissions:
+    # contents: write -> create the GitHub Release
+    # id-token: write -> npm Trusted Publishing (OIDC)
     contents: write
-    pull-requests: write
     id-token: write
-    statuses: write
 
+# One run per tag; a re-run waits for the first rather than racing it.
 concurrency:
-    group: release
+    group: npm-publish-${{ github.ref }}
     cancel-in-progress: false
 
 jobs:
-    release:
-        name: Version and publish @heroiclands/content-language-server
+    publish:
+        name: Publish @heroiclands/content-language-server
+        # GitHub only, and only for a `v*` tag. Gitea reads `.gitea/workflows/`
+        # and not this directory; the guard covers that being wrong.
+        if: ${{ github.server_url == 'https://github.com' && startsWith(github.ref, 'refs/tags/v') }}
         runs-on: ubuntu-latest
         steps:
+            # The whole history, so the tag's commit can be checked against
+            # `main`.
             - uses: actions/checkout@v7
               with:
                   fetch-depth: 0
+
             - uses: actions/setup-node@v7
               with:
                   node-version: 24
                   cache: npm
                   registry-url: https://registry.npmjs.org
-            - run: npm ci
-            - run: npm test
-            - run: npm pack --dry-run --json
+
+            # Refuses before anything is installed. The tag must name the
+            # checked-out commit, that commit must be on `main`, and the tag
+            # must be `v` plus the version that commit's package.json declares.
+            - name: Check the tag
+              id: tag
+              run: |
+                  set -euo pipefail
+                  TAG="$GITHUB_REF_NAME"
+                  NAME="$(node -p "require('./package.json').name")"
+                  VERSION="$(node -p "require('./package.json').version")"
+                  COMMIT="$(git rev-parse "refs/tags/$TAG^{commit}")"
+                  if [ "$COMMIT" != "$(git rev-parse HEAD)" ]; then
+                      echo "::error::$TAG names $COMMIT, but the checkout is at $(git rev-parse HEAD)." >&2
+                      exit 1
+                  fi
+                  if [ "$TAG" != "v$VERSION" ]; then
+                      echo "::error::$TAG does not match package.json's version $VERSION at $COMMIT. Refusing to publish." >&2
+                      exit 1
+                  fi
+                  git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main
+                  if ! git merge-base --is-ancestor "$COMMIT" refs/remotes/origin/main; then
+                      echo "::error::$TAG names $COMMIT, which is not on main. Only a version merged to main is published." >&2
+                      exit 1
+                  fi
+                  echo "$TAG names $COMMIT on main, version $VERSION of $NAME."
+                  {
+                      echo "name=$NAME"
+                      echo "version=$VERSION"
+                  } >> "$GITHUB_OUTPUT"
+
+            # The registry's answer for this exact version: 200 published, 404
+            # not, anything else stops the run rather than guessing.
+            - name: Is this version on npm?
+              id: registry
+              env:
+                  NAME: ${{ steps.tag.outputs.name }}
+                  VERSION: ${{ steps.tag.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  url="https://registry.npmjs.org/${NAME/\//%2f}/$VERSION"
+                  status="$(curl -sS -o /dev/null -w '%{http_code}' "$url")"
+                  case "$status" in
+                      200)
+                          echo "$NAME@$VERSION is already on npm; it is not published again."
+                          echo "published=true" >> "$GITHUB_OUTPUT"
+                          ;;
+                      404)
+                          echo "$NAME@$VERSION is not on npm yet."
+                          echo "published=false" >> "$GITHUB_OUTPUT"
+                          ;;
+                      *)
+                          echo "::error::$url answered $status; cannot tell whether $VERSION is published." >&2
+                          exit 1
+                          ;;
+                  esac
+
+            - name: Install dependencies
+              if: steps.registry.outputs.published == 'false'
+              run: npm ci
+            - name: Tests
+              if: steps.registry.outputs.published == 'false'
+              run: npm test
+            - name: Package contents
+              if: steps.registry.outputs.published == 'false'
+              run: npm pack --dry-run --json
+
+            # OIDC Trusted Publishing needs npm >= 11.5, which the npm bundled
+            # with the newest Node 24 clears.
             - name: Confirm npm can use OIDC
+              if: steps.registry.outputs.published == 'false'
               run: |
                   VERSION="$(npm --version)"
                   MAJOR="${VERSION%%.*}"
                   REST="${VERSION#*.}"
                   MINOR="${REST%%.*}"
                   if [ "$MAJOR" -lt 11 ] || { [ "$MAJOR" -eq 11 ] && [ "$MINOR" -lt 5 ]; }; then
-                    echo "::error::npm $VERSION cannot use OIDC Trusted Publishing, which needs >= 11.5." >&2
-                    exit 1
+                      echo "::error::npm $VERSION cannot use OIDC Trusted Publishing, which needs >= 11.5." >&2
+                      exit 1
                   fi
-            - name: Check whether the package exists on npm
-              id: registry
+                  echo "npm $VERSION satisfies the OIDC floor of 11.5."
+
+            - name: Publish
+              if: steps.registry.outputs.published == 'false'
+              run: npm publish --provenance
+
+            - name: Confirm the published version
+              if: steps.registry.outputs.published == 'false'
+              env:
+                  NAME: ${{ steps.tag.outputs.name }}
+              run: npm view "$NAME" dist-tags --json
+
+            # The section of CHANGELOG.md under `## <version>`, without the
+            # heading. The version is on npm by now, so a changelog that opens
+            # with another section is a warning and a pointer.
+            - name: Read the changelog section for this version
+              env:
+                  VERSION: ${{ steps.tag.outputs.version }}
               run: |
-                  if npm view @heroiclands/content-language-server version >/dev/null 2>&1; then
-                    echo 'exists=true' >> "$GITHUB_OUTPUT"
+                  set -euo pipefail
+                  notes="$RUNNER_TEMP/release-notes.md"
+                  if [ "$(grep -m1 '^## ' CHANGELOG.md || true)" = "## $VERSION" ]; then
+                      awk '/^## /{c++; if (c>=2) exit; next} c==1{print}' CHANGELOG.md > "$notes"
                   else
-                    echo 'The first publication is performed by a package maintainer.'
-                    echo 'exists=false' >> "$GITHUB_OUTPUT"
+                      echo "::warning::CHANGELOG.md does not open with a '## $VERSION' section; the Release points to it instead."
+                      echo "See CHANGELOG.md for $VERSION." > "$notes"
                   fi
-            - name: Version, or publish
-              if: steps.registry.outputs.exists == 'true'
-              id: changesets
-              uses: changesets/action@v2
-              with:
-                  version-script: npm run changeset:version
-                  publish-script: npx changeset publish
-                  commit-message: "chore(release): version packages"
-                  pr-title: "chore(release): version packages"
+
+            # After the publish, so a Release never announces a version npm
+            # does not have. One that exists is left alone.
+            - name: Create the GitHub Release
               env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            - name: Mark the version pull request as having passed the build
-              if: steps.registry.outputs.exists == 'true' && steps.changesets.outputs['pr-number'] != ''
-              env:
-                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ github.ref_name }}
+                  VERSION: ${{ steps.tag.outputs.version }}
               run: |
-                  SHA=$(gh api "repos/${{ github.repository }}/pulls/${{ steps.changesets.outputs['pr-number'] }}" --jq .head.sha)
-                  gh api --method POST "repos/${{ github.repository }}/statuses/$SHA" \
-                    -f state=success \
-                    -f context='Build & Test' \
-                    -f description='This pull request is the version bump.'
+                  set -euo pipefail
+                  if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+                      echo "The GitHub Release for $TAG already exists."
+                      exit 0
+                  fi
+                  flags=()
+                  case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+                  gh release create "$TAG" --verify-tag --title "$TAG" \
+                      --notes-file "$RUNNER_TEMP/release-notes.md" "${flags[@]}"

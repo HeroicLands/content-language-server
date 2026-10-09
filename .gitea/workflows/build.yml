@@ -1,11 +1,12 @@
 name: Build and Test
 
-# On GitHub, the push mirror of the Gitea repository, this checks pull requests
-# from contributors and nothing else: a mirror push runs nothing here. Gitea
-# runs the same job from `.gitea/workflows/build.yml` on pull requests and on
-# `main`.
+# The Gitea copy of `.github/workflows/build.yml`: the same job, also run on
+# `main`. `tests/mirror-workflows.test.ts` fails when the two copies' steps
+# differ.
 on:
     pull_request:
+        branches: [main]
+    push:
         branches: [main]
 
 permissions:
