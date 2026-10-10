@@ -15,6 +15,8 @@ import {
     runLanguageServer,
 } from "../engine/content-language-server.mjs";
 import { generatorVersion } from "../engine/content-language-index.mjs";
+import { readCanonicalKey } from "@heroiclands/package-build/engine/address";
+import { AddressLink, publishAddresses } from "@heroiclands/package-build/engine/address-values";
 
 let root: string;
 let workspace: ContentWorkspace;
@@ -30,9 +32,43 @@ function index(records: object[]): void {
     indexFor(workspace, records);
 }
 
+/**
+ * Write a fixture record in the published index's form. Fixtures state each
+ * canonical Address as text and each anchor's kind where it is not `prose`;
+ * package-build's own publisher writes the Address objects.
+ */
+function published(record: any): object {
+    const canonical = record.address?.canonical;
+    if (typeof canonical !== "string") return record;
+    const tuple = readCanonicalKey(canonical);
+    return {
+        ...record,
+        address: { ...record.address, canonical: publishAddresses(tuple) },
+        ...(record.anchors ?
+            {
+                anchors: record.anchors.map((anchor: any) => {
+                    const kind = anchor.kind ?? "prose";
+                    return {
+                        ...anchor,
+                        kind,
+                        link: publishAddresses(new AddressLink(tuple, anchor.slug, kind)),
+                    };
+                }),
+            }
+        :   {}),
+    };
+}
+
 function indexFor(project: ContentWorkspace, records: object[]): void {
+    writeIndex(
+        project,
+        records.map((record) => JSON.stringify(published(record))).join("\n") + "\n",
+    );
+}
+
+/** Write index lines exactly as given, with a manifest that accepts them. */
+function writeIndex(project: ContentWorkspace, text: string): void {
     fs.mkdirSync(project.cacheDirectory, { recursive: true });
-    const text = records.map((record) => JSON.stringify(record)).join("\n") + "\n";
     fs.writeFileSync(project.indexFile, text);
     fs.writeFileSync(
         path.join(project.cacheDirectory, "metadata.json"),
@@ -1112,6 +1148,7 @@ describe("content language server", () => {
                 ...alpha,
                 name: { full: "Unwritten Legend" },
                 address: null,
+                anchors: null,
                 file: { path: "Stub.md" },
             },
         ]);
@@ -1287,5 +1324,100 @@ describe("content language server", () => {
         vi.advanceTimersByTime(300);
         expect(reply).toContain('"method":"textDocument/publishDiagnostics"');
         expect(reply).toContain('"severity":1');
+    });
+});
+
+describe("published index records", () => {
+    const fixtures = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
+    let thalorna: ContentWorkspace;
+
+    function thalornaNote(file: string, text: string): string {
+        const full = path.join(root, "thalorna/assets/content", file);
+        fs.mkdirSync(path.dirname(full), { recursive: true });
+        fs.writeFileSync(full, text);
+        return pathToFileURL(full).href;
+    }
+
+    beforeEach(() => {
+        fs.mkdirSync(path.join(root, "thalorna/assets/content"), { recursive: true });
+        thalorna = new ContentWorkspace(
+            {
+                rootDir: path.join(root, "thalorna"),
+                contentPackage: "thalorna",
+                packs: [],
+                skipDirectories: [],
+                paths: {
+                    content: path.join(root, "thalorna/assets/content"),
+                    assets: path.join(root, "thalorna/assets"),
+                    contentIndex: path.join(root, "thalorna/build/content-index"),
+                },
+            } as any,
+            { cacheBase: path.join(root, "cache") },
+        );
+        writeIndex(
+            thalorna,
+            fs.readFileSync(path.join(fixtures, "thalorna-published.jsonl"), "utf8"),
+        );
+    });
+
+    afterEach(() => thalorna.close());
+
+    it("reads Address objects into completion, symbols and definitions", () => {
+        const lines = Array.from({ length: 160 }, (_, i) => `Line ${i + 1}.`);
+        const target = thalornaNote("Lore/Cultures/Khazryn.md", lines.join("\n") + "\n");
+        thalorna.requireIndex();
+        expect(thalorna.resolve("lore-khazrynclt")?.shortcode).toBe("khazrynclt");
+        expect(thalorna.symbols("khazrynclt")).toEqual([
+            expect.objectContaining({ location: expect.objectContaining({ uri: target }) }),
+        ]);
+        const typing = thalornaNote("Typing.md", "See [[khazryn");
+        const names = respond(thalorna, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: typing }, position: { line: 0, character: 13 } },
+        }) as any[];
+        expect(names.map((item: any) => item.textEdit.newText)).toEqual(["lore-khazrynclt"]);
+        expect(names[0].data.address).toBe("thalorna-note-lore-khazrynclt");
+        const text = "See [[lore-khazrynclt#glossary|Glossary]].\n";
+        const source = thalornaNote("Source.md", text);
+        expect(
+            thalorna.definition(source, { line: 0, character: text.indexOf("khazrynclt") }),
+        ).toMatchObject({ uri: target, range: { start: { line: 152, character: 0 } } });
+    });
+
+    it("completes only prose anchors in a wikilink", () => {
+        const source = thalornaNote("Source.md", "See [[lore-khazrynclt#");
+        const anchors = respond(thalorna, {
+            method: "textDocument/completion",
+            params: { textDocument: { uri: source }, position: { line: 0, character: 22 } },
+        }) as any[];
+        expect(anchors.map((item: any) => item.textEdit.newText)).toEqual(["glossary"]);
+    });
+
+    it("reports a wikilink that names an event anchor", () => {
+        const text =
+            "[[lore-khazrynclt#migration|Migration]] [[lore-khazrynclt#glossary|Glossary]]\n";
+        const source = thalornaNote("Source.md", text);
+        thalorna.documents.set(source, text);
+        const findings = thalorna.diagnostics(source);
+        expect(findings).toHaveLength(1);
+        expect(findings[0].range.start.character).toBe(2);
+        expect(findings[0].message).toContain("names an event");
+    });
+
+    it("refuses a record whose Addresses are strings, naming the package and record", () => {
+        const status: string[] = [];
+        thalorna.onStatus = (message: string | null) => {
+            if (message) status.push(message);
+        };
+        writeIndex(
+            thalorna,
+            fs.readFileSync(path.join(fixtures, "thalorna-string-addresses.jsonl"), "utf8"),
+        );
+        expect(() => thalorna.symbols("khelathuadvguide")).toThrow("No editor index");
+        expect(status).toHaveLength(1);
+        expect(status[0]).toContain(`${thalorna.indexFile}:1: error: `);
+        expect(status[0]).toContain("thalorna");
+        expect(status[0]).toContain("doc khelathuadvguide");
+        expect(status[0]).toContain("address.canonical");
     });
 });

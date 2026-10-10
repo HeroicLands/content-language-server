@@ -616,7 +616,12 @@ export class ContentWorkspace {
         const needle = searchKey(context.query);
         if (context.kind === "anchor")
             return (context.target.anchors ?? [])
-                .filter((anchor) => searchKey(`${anchor.slug} ${anchor.name}`).includes(needle))
+                .filter(
+                    (anchor) =>
+                        // A wikilink names a body anchor; an event is named from frontmatter.
+                        anchor.kind === "prose" &&
+                        searchKey(`${anchor.slug} ${anchor.name}`).includes(needle),
+                )
                 .map((anchor) =>
                     completionItem(
                         anchor.slug,
@@ -848,18 +853,19 @@ export class ContentWorkspace {
                     record.type !== defaults.type
                 )
                     message = `Address ${target} targets ${record.type}, but this field accepts ${defaults.type}`;
-                else if (
-                    anchor &&
-                    !record.anchors?.some(
+                else if (anchor) {
+                    const named = record.anchors?.find(
                         (entry) => entry.slug.toLowerCase() === anchor.toLowerCase(),
-                    )
-                )
-                    reason = "unknown-anchor";
+                    );
+                    if (!named) reason = "unknown-anchor";
+                    else if (kind !== "frontmatter" && named.kind !== "prose")
+                        reason = "event-anchor";
+                }
             }
             if (reason)
                 message = linkFindingMessage({
                     reason,
-                    target,
+                    target: reason === "event-anchor" ? written : target,
                     anchor,
                     type: record?.type,
                 });

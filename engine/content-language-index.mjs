@@ -10,6 +10,11 @@ import {
     indexRecordsFor,
     serializeContentIndex,
 } from "@heroiclands/package-build/engine/content-index";
+import {
+    flattenPublishedAddresses,
+    isPublishedAddress,
+} from "@heroiclands/package-build/engine/address-values";
+import { formatDiagnostic } from "@heroiclands/package-build/engine/diagnostics";
 import packageBuild from "@heroiclands/package-build/package.json" with { type: "json" };
 
 /** Version of the server package that generates editor index records. */
@@ -70,16 +75,80 @@ function withProjectLock(directory, action) {
     }
 }
 
+/** The kinds an index anchor carries: a body anchor, or an event's `id`. */
+const ANCHOR_KINDS = new Set(["prose", "event"]);
+
+/**
+ * The first field of RECORD that is not in the published index's shape, or
+ * null. Every Address the index writes is `{ address, anchor, anchorKind }`,
+ * and every anchor states its kind.
+ */
+function misshapenField(record) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) return "record";
+    if (record.address != null && !isPublishedAddress(record.address.canonical))
+        return "address.canonical";
+    if (record.documentation != null && !isPublishedAddress(record.documentation))
+        return "documentation";
+    if (record.anchors != null) {
+        if (!Array.isArray(record.anchors)) return "anchors";
+        for (const anchor of record.anchors) {
+            if (!ANCHOR_KINDS.has(anchor?.kind)) return "anchors[].kind";
+            if (anchor.link != null && !isPublishedAddress(anchor.link)) return "anchors[].link";
+        }
+    }
+    return null;
+}
+
+/**
+ * Read index lines written by package-build's `serializeContentIndex`.
+ *
+ * Each Address object becomes the text an author writes — the canonical
+ * Address, with `#<anchor>` where it carries one — so a record compares
+ * directly with an Address in a note. An anchor keeps its `kind`.
+ *
+ * @param {string} text - JSON Lines.
+ * @param {string} file - The file the lines came from, for the finding.
+ * @param {string} contentPackage - The package the index describes.
+ * @returns {object[]} The records.
+ * @throws {Error} A `file:line: error:` finding naming the package, the record
+ *   and the field, when a record is not in the published shape.
+ */
+export function readIndexRecords(text, file, contentPackage) {
+    return text
+        .split("\n")
+        .map((line, number) => ({ line, number: number + 1 }))
+        .filter(({ line }) => line)
+        .map(({ line, number }) => {
+            const record = JSON.parse(line);
+            const field = misshapenField(record);
+            if (field) {
+                const named = [record?.type, record?.shortcode].filter(Boolean).join(" ");
+                throw new Error(
+                    formatDiagnostic({
+                        file,
+                        line: number,
+                        severity: "error",
+                        message:
+                            `the ${contentPackage} editor index is not in the shape package-build ` +
+                            `${generatorVersion} publishes` +
+                            (named ? ` (record ${named}, field ${field})` : ` (field ${field})`) +
+                            `: an Address is an { address, anchor, anchorKind } object and an ` +
+                            `anchor states its kind. Save a note in ${contentPackage} to rebuild ` +
+                            `the index`,
+                    }),
+                );
+            }
+            return flattenPublishedAddresses(record);
+        });
+}
+
 function readPair(indexFile, manifestFile, contentPackage) {
     const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
     if (manifest.package !== contentPackage || manifest.generatorVersion !== generatorVersion)
         throw new Error(`Incompatible editor index at ${indexFile}`);
     const text = fs.readFileSync(indexFile, "utf8");
     if (checksum(text) !== manifest.sha256) throw new Error(`Corrupt editor index at ${indexFile}`);
-    return text
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => JSON.parse(line));
+    return readIndexRecords(text, indexFile, contentPackage);
 }
 
 /** Read only a complete snapshot produced by this generator and package. */
@@ -147,9 +216,10 @@ export function rebuildLanguageIndex(config, directory) {
             fs.rmSync(indexTemp, { force: true });
             fs.rmSync(manifestTemp, { force: true });
         }
-        return text
-            .split("\n")
-            .filter(Boolean)
-            .map((line) => JSON.parse(line));
+        return readIndexRecords(
+            text,
+            path.join(directory, "metadata.jsonl"),
+            config.contentPackage,
+        );
     });
 }
