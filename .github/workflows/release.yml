@@ -140,11 +140,16 @@ jobs:
               if: steps.registry.outputs.published == 'false'
               run: npm publish --provenance
 
+            # `npm publish` returns before the registry serves the version, so
+            # the publish alone proves nothing. Polls `npm view <name>@<version>`
+            # every 15 seconds for ten minutes and fails the job, naming the
+            # last registry answer, when the version never appears.
             - name: Confirm the published version
               if: steps.registry.outputs.published == 'false'
               env:
                   NAME: ${{ steps.tag.outputs.name }}
-              run: npm view "$NAME" dist-tags --json
+                  VERSION: ${{ steps.tag.outputs.version }}
+              run: node ci/confirm-npm-version.mjs "$NAME" "$VERSION"
 
             # The section of CHANGELOG.md under `## <version>`, without the
             # heading. The version is on npm by now, so a changelog that opens
