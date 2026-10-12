@@ -134,7 +134,11 @@ describe("release.yml on GitHub", () => {
             /git merge-base --is-ancestor "\$COMMIT" refs\/remotes\/origin\/main/,
         );
         expect(check.run).toMatch(/git rev-parse "refs\/tags\/\$TAG\^\{commit\}"/);
-        expect(steps[0]).toMatchObject({ uses: "actions/checkout@v7", with: { "fetch-depth": 0 } });
+        // Actions are pinned to a full commit SHA; the runner fetches a pinned action once.
+        expect(steps[0]).toMatchObject({
+            uses: expect.stringMatching(/^actions\/checkout@[0-9a-f]{40}$/),
+            with: { "fetch-depth": 0 },
+        });
     });
 
     it("never publishes a version npm already has, and stops when the registry cannot say", () => {
@@ -184,7 +188,9 @@ describe("the Gitea workflows", () => {
         expect(triggers(release)).toHaveProperty("push", { branches: ["main"] });
         expect(release.jobs).toEqual({
             release: {
-                uses: "HeroicLands/.github/.gitea/workflows/release-npm-package.yml@main",
+                uses: expect.stringMatching(
+                    /^HeroicLands\/\.github\/\.gitea\/workflows\/release-npm-package\.yml@[0-9a-f]{40}$/,
+                ),
                 secrets: { RELEASE_BOT_TOKEN: "${{ secrets.RELEASE_BOT_TOKEN }}" },
             },
         });
