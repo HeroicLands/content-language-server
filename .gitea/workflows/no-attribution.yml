@@ -11,7 +11,7 @@ permissions:
 jobs:
     no-attribution:
         name: No AI attribution
-        runs-on: ubuntu-latest
+        runs-on: light
         steps:
             - uses: HeroicLands/.github/actions/no-attribution@main
               with:

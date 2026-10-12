@@ -203,8 +203,12 @@ describe("the Gitea workflows", () => {
     });
 
     it("carry the same no-attribution check as the GitHub copy", () => {
-        expect(gitea.get("no-attribution.yml")!.parsed).toEqual(
-            github.get("no-attribution.yml")!.parsed,
-        );
+        // Gitea runs the check on its `light` runners; GitHub has only its
+        // hosted ones. Every other part of the workflow is identical.
+        const giteaCopy = structuredClone(gitea.get("no-attribution.yml")!.parsed);
+        for (const job of Object.values(giteaCopy.jobs ?? {})) {
+            if (job["runs-on"] === "light") job["runs-on"] = "ubuntu-latest";
+        }
+        expect(giteaCopy).toEqual(github.get("no-attribution.yml")!.parsed);
     });
 });
