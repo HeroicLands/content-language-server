@@ -1,5 +1,11 @@
 # @heroiclands/content-language-server
 
+## 0.2.4
+
+### Patch Changes
+
+- Anchor completion in a wikilink offers a note's sections and leaves out its events, and a wikilink that names an event is reported as an error, matching the build.
+
 ## 0.2.3
 
 ### Patch Changes
