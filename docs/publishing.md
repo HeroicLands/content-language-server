@@ -3,9 +3,9 @@
 The repository's primary forge is Gitea, and GitHub is its push mirror. A release runs in two halves, one on each.
 
 1. **Version, on Gitea.** Merging a changeset to `main` runs `.gitea/workflows/release.yml`, which opens or updates the Version Packages pull request. Merging that pull request runs the same workflow again, which pushes the tag `v<version>` at the merged version commit. Releasing from Gitea is switched on by the repository variable `HL_RELEASE_ENABLED`.
-2. **Publish, on GitHub.** The push mirror carries the tag to GitHub, where it starts `.github/workflows/release.yml`. The workflow refuses a tag that names a commit outside `main` or that is not `v<version>` of the tagged `package.json`. When npm does not have the version yet, it runs the tests and publishes with npm trusted publishing and provenance. It then creates the GitHub Release from the version's changelog section, unless one exists.
+2. **Publish, on GitHub.** The push mirror carries the tag to GitHub, where it starts `.github/workflows/release.yml`, the only workflow GitHub runs. Every check has already run on Gitea before the tag exists, so the workflow publishes with npm trusted publishing and provenance, then creates the GitHub Release from the version's changelog section.
 
-Nothing on Gitea publishes to npm, and nothing on GitHub runs for a branch push. Every step of the GitHub half is safe to repeat: re-running it, or dispatching it with the tag as its ref, finishes a release whose publish or Release step failed and changes nothing for one that completed.
+Nothing on Gitea publishes to npm, and nothing on GitHub runs for a branch push.
 
 ## Trusted publisher
 

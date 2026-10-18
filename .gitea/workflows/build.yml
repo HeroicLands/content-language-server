@@ -1,8 +1,6 @@
 name: Build and Test
 
-# The Gitea copy of `.github/workflows/build.yml`: the same job, also run on
-# `main`. `tests/mirror-workflows.test.ts` fails when the two copies' steps
-# differ.
+# Build and test, on pull requests and on `main`.
 on:
     pull_request:
         branches: [main]

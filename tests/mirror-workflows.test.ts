@@ -5,10 +5,10 @@
 /**
  * The two forges' workflows, and the one path from a tag to npm.
  *
- * Gitea is the primary forge and reads `.gitea/workflows/`; GitHub is its push
- * mirror and reads `.github/workflows/`. Every mirror push reaches GitHub, so a
- * GitHub workflow triggered by a branch push would run on each one. The only
- * push GitHub acts on is a `v*` tag, which `release.yml` publishes to npm.
+ * Gitea is the primary forge and reads `.gitea/workflows/`, where every check
+ * runs; GitHub is its push mirror and reads `.github/workflows/`. Every mirror
+ * push reaches GitHub, so the one GitHub workflow, `release.yml`, runs only for
+ * a `v*` tag and publishes it to npm.
  *
  * npm's trusted publisher is bound to this repository and the file name
  * `release.yml` with no environment, so the publish stays in that file, on
@@ -74,33 +74,12 @@ const github = workflows(".github/workflows");
 const gitea = workflows(".gitea/workflows");
 
 describe("the GitHub mirror's workflows", () => {
-    it("are found at all, so the cases below are not vacuous", () => {
-        expect([...github.keys()]).toContain("release.yml");
-        expect(github.size).toBeGreaterThan(1);
+    it("are release.yml alone", () => {
+        expect([...github.keys()]).toEqual(["release.yml"]);
     });
 
-    it("run on no branch push; only release.yml runs on a push, and only for a v* tag", () => {
-        for (const [name, { parsed }] of github) {
-            const on = triggers(parsed);
-            for (const event of [
-                "push",
-                "pull_request_target",
-                "workflow_run",
-                "schedule",
-                "create",
-            ]) {
-                if (name === "release.yml" && event === "push") continue;
-                expect(on, `${name} runs on ${event}`).not.toHaveProperty(event);
-            }
-        }
-        expect(triggers(github.get("release.yml")!.parsed).push).toEqual({ tags: ["v*"] });
-    });
-
-    it("publish to npm from release.yml alone", () => {
-        for (const [name, { source }] of github) {
-            if (name === "release.yml") continue;
-            expect(code(source), `${name} reaches npm`).not.toMatch(NPM_PUBLISH);
-        }
+    it("run on a v* tag push and nothing else", () => {
+        expect(triggers(github.get("release.yml")!.parsed)).toEqual({ push: { tags: ["v*"] } });
     });
 });
 
@@ -109,65 +88,30 @@ describe("release.yml on GitHub", () => {
     const jobs = Object.entries(parsed.jobs ?? {});
     const [, job] = jobs[0];
     const steps = job.steps ?? [];
-    const named = (name: string) => {
-        const step = steps.find((s) => s.name === name);
-        expect(step, `no step named "${name}"`).toBeDefined();
-        return step as { if?: string; run?: string; env?: Record<string, string> };
-    };
 
-    it("is one job, guarded to GitHub and to a v* tag, with no environment", () => {
+    it("is one job with no environment and only the permissions publishing needs", () => {
         expect(jobs).toHaveLength(1);
-        expect(job.if).toBe(
-            "${{ github.server_url == 'https://github.com' && startsWith(github.ref, 'refs/tags/v') }}",
-        );
         // The trusted publisher on npm names no environment; one here would
         // stop the OIDC token matching it.
         expect(job).not.toHaveProperty("environment");
         expect(parsed.permissions).toEqual({ contents: "write", "id-token": "write" });
     });
 
-    it("checks the tag before installing anything: its commit, its version, and main", () => {
-        const check = named("Check the tag");
-        expect(steps.indexOf(check)).toBeLessThan(steps.findIndex((s) => s.run === "npm ci"));
-        expect(check.run).toMatch(/\[ "\$TAG" != "v\$VERSION" \]/);
-        expect(check.run).toMatch(
-            /git merge-base --is-ancestor "\$COMMIT" refs\/remotes\/origin\/main/,
-        );
-        expect(check.run).toMatch(/git rev-parse "refs\/tags\/\$TAG\^\{commit\}"/);
-        // Actions are pinned to a full commit SHA; the runner fetches a pinned action once.
-        expect(steps[0]).toMatchObject({
-            uses: expect.stringMatching(/^actions\/checkout@[0-9a-f]{40}$/),
-            with: { "fetch-depth": 0 },
-        });
+    it("pins its actions to a full commit SHA", () => {
+        const uses = steps.map((s) => s.uses).filter((u): u is string => typeof u === "string");
+        expect(uses.length).toBeGreaterThan(0);
+        for (const u of uses) expect(u).toMatch(/^[^@]+@[0-9a-f]{40}$/);
     });
 
-    it("never publishes a version npm already has, and stops when the registry cannot say", () => {
-        const registry = named("Is this version on npm?");
-        expect(registry.run).toMatch(/200\)[\s\S]*published=true/);
-        expect(registry.run).toMatch(/404\)[\s\S]*published=false/);
-        expect(registry.run).toMatch(/\*\)[\s\S]*exit 1/);
-        const publish = named("Publish");
-        expect(publish.run).toBe("npm publish --provenance");
-        expect(publish.if).toBe("steps.registry.outputs.published == 'false'");
-        for (const name of [
-            "Install dependencies",
-            "Tests",
-            "Package contents",
-            "Confirm npm can use OIDC",
-        ]) {
-            expect(named(name).if, name).toBe("steps.registry.outputs.published == 'false'");
-        }
-        expect(steps.indexOf(registry)).toBeLessThan(steps.indexOf(publish));
+    it("publishes with provenance, then creates the Release", () => {
+        const runs = steps.map((s) => s.run).filter((r): r is string => typeof r === "string");
+        const publish = runs.findIndex((r) => r === "npm publish --provenance");
+        const release = runs.findIndex((r) => /gh release create "\$GITHUB_REF_NAME"/.test(r));
+        expect(publish).toBeGreaterThanOrEqual(0);
+        expect(release).toBeGreaterThan(publish);
     });
 
-    it("creates the Release after the publish, and only when none exists", () => {
-        const release = named("Create the GitHub Release");
-        expect(steps.indexOf(release)).toBeGreaterThan(steps.indexOf(named("Publish")));
-        expect(release.run).toMatch(/gh release view "\$TAG"[\s\S]*exit 0/);
-        expect(release.run).toMatch(/gh release create "\$TAG" --verify-tag/);
-    });
-
-    it("says why its file name and job shape are bound to npm", () => {
+    it("says why its file name is bound to npm", () => {
         expect(source).toMatch(/The file name is load-bearing/);
         expect(code(source)).not.toMatch(
             /changesets\/action|create-github-app-token|RELEASE_APP|secrets\.NPM/,
@@ -194,27 +138,5 @@ describe("the Gitea workflows", () => {
                 secrets: { RELEASE_BOT_TOKEN: "${{ secrets.RELEASE_BOT_TOKEN }}" },
             },
         });
-    });
-
-    it("run the same Build & Test steps as the GitHub copy", () => {
-        const a = github.get("build.yml")!.parsed.jobs!;
-        const b = gitea.get("build.yml")!.parsed.jobs!;
-        expect(Object.keys(b)).toEqual(Object.keys(a));
-        for (const name of Object.keys(a)) {
-            expect(b[name].steps, name).toEqual(a[name].steps);
-        }
-        expect(triggers(gitea.get("build.yml")!.parsed)).toHaveProperty("push", {
-            branches: ["main"],
-        });
-    });
-
-    it("carry the same no-attribution check as the GitHub copy", () => {
-        // Gitea runs the check on its `light` runners; GitHub has only its
-        // hosted ones. Every other part of the workflow is identical.
-        const giteaCopy = structuredClone(gitea.get("no-attribution.yml")!.parsed);
-        for (const job of Object.values(giteaCopy.jobs ?? {})) {
-            if (job["runs-on"] === "light") job["runs-on"] = "ubuntu-latest";
-        }
-        expect(giteaCopy).toEqual(github.get("no-attribution.yml")!.parsed);
     });
 });
