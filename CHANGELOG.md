@@ -1,5 +1,13 @@
 # @heroiclands/content-language-server
 
+## 0.2.5
+
+### Patch Changes
+
+**Editor features**
+
+- Completion and symbol search find a note's alternate names again with current content indexes, from every language the note lists.
+
 ## 0.2.4
 
 ### Patch Changes
