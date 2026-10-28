@@ -86,9 +86,9 @@ const alpha = {
     package: "test",
     type: "lore",
     shortcode: "alpha",
-    name: { full: "Ályra", aliases: ["First Light"] },
+    name: { full: "Ályra", en: ["First Light"] },
     nameAscii: "Alyra",
-    aliasesAscii: ["First Light"],
+    formsAscii: { en: ["First Light"] },
     tags: ["myth"],
     address: { slug: "lore-alpha", canonical: "test-note-lore-alpha" },
     anchors: [{ slug: "history", line: 7, name: "History" }],
@@ -454,7 +454,7 @@ describe("content language server", () => {
         expect(items.every((item) => item.textEdit.range.start.character === 6)).toBe(true);
     });
 
-    it("marks exact names and aliases for editor display while retaining target identity", () => {
+    it("marks exact names and alternate names for editor display while retaining target identity", () => {
         const source = note("Source.md", "[[First Light");
         index([
             alpha,
@@ -462,7 +462,7 @@ describe("content language server", () => {
                 ...alpha,
                 package: "test",
                 shortcode: "beta",
-                name: { full: "Another Light", aliases: ["First Light"] },
+                name: { full: "Another Light", en: ["First Light"] },
                 address: { slug: "lore-beta", canonical: "test-note-lore-beta" },
                 file: { path: "Beta.md" },
             },
@@ -995,7 +995,7 @@ describe("content language server", () => {
         respond(workspace, { method: "initialize" });
         note(
             "Alpha.md",
-            "---\ntype: lore\nshortcode: beta\nname:\n  full: Second\n  aliases:\n    - Other Name\ntags:\n  - myth\n---\nBody.\n",
+            "---\ntype: lore\nshortcode: beta\nname:\n  full: Second\n  en:\n    - Other Name\ntags:\n  - myth\n---\nBody.\n",
         );
         respond(workspace, {
             method: "textDocument/didSave",
@@ -1095,9 +1095,9 @@ describe("content language server", () => {
                 ...alpha,
                 type: "place",
                 shortcode: "beta",
-                name: { full: "Camel Crossing", aliases: ["Old Ford"] },
+                name: { full: "Camel Crossing", en: ["Old Ford"], vy: ["Kámel Dras"] },
                 nameAscii: "Camel Crossing",
-                aliasesAscii: ["Old Ford"],
+                formsAscii: { en: ["Old Ford"], vy: ["Kamel Dras"] },
                 tags: [],
                 address: { slug: "place-beta", canonical: "test-note-place-beta" },
                 file: { path: "Beta.md" },
@@ -1105,6 +1105,8 @@ describe("content language server", () => {
         ]);
         expect(workspace.symbols("name:alyra")).toHaveLength(1);
         expect(workspace.symbols("name:old ford")).toHaveLength(1);
+        expect(workspace.symbols("name:kamel dras")).toHaveLength(1);
+        expect(workspace.symbols("name:Kámel")).toHaveLength(1);
         expect(workspace.symbols("shortcode:beta")).toHaveLength(1);
         expect(workspace.symbols("type:place")).toHaveLength(1);
         expect(workspace.symbols("package:test")).toHaveLength(2);

@@ -12,7 +12,7 @@ Editors can pass explicit foreign content roots in LSP initialization options. A
 
 Workspace-symbol queries accept `name:`, `shortcode:`, `type:`, `tag:`, and `package:` filters. For example, `all:type:lore` searches every configured project, while `package:thalorna name:camel` searches names in one configured package.
 
-Completion searches anywhere in indexed names, aliases, and Addresses. It inserts the shortest Address that identifies the selected target in the current note, including its system or package when needed. Ordinary `[[...]]` links default to readable `note` content; `![[...]]` embeds default to systemless `none` assets. Clients receive standard LSP completion items with exact text edits.
+Completion searches anywhere in indexed names, alternate names, and Addresses. It inserts the shortest Address that identifies the selected target in the current note, including its system or package when needed. Ordinary `[[...]]` links default to readable `note` content; `![[...]]` embeds default to systemless `none` assets. Clients receive standard LSP completion items with exact text edits.
 
 Open notes receive diagnostics for complete links, embeds, and declared Address fields. The server reads live text for ranges and checks targets against saved indexes and declared content dependencies. It waits briefly after typing before publishing findings.
 

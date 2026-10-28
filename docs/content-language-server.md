@@ -17,13 +17,13 @@ heroiclands-content-language-server --rebuild-index
 
 The first prints the private JSONL path. The second is manual recovery when a file operation did not trigger a rebuild; it prints the path on success and exits nonzero on failure. Restarting the server also rebuilds from saved source. A failed rebuild leaves the complete prior snapshot in place. If there is no valid prior snapshot, navigation reports that no index is available.
 
-| LSP request                       | Behavior                                                                                                                                              |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `textDocument/definition`         | Follows an Address or wikilink to the indexed note. An anchor lands on its indexed line.                                                              |
-| `textDocument/completion`         | Completes unfinished wikilinks, anchors, and declared frontmatter Address values or keys.                                                             |
-| `workspace/symbol`                | Finds notes by name, alias, ASCII name, shortcode, or Address. Field and project prefixes narrow the saved index. One result appears per source note. |
-| `textDocument/references`         | Finds authored wikilinks, embeds, and declared frontmatter Address values or keys. Ordinary prose is excluded.                                        |
-| `textDocument/publishDiagnostics` | Reports invalid complete links, embeds, anchors, and declared frontmatter Address targets in open notes.                                              |
+| LSP request                       | Behavior                                                                                                                                                       |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `textDocument/definition`         | Follows an Address or wikilink to the indexed note. An anchor lands on its indexed line.                                                                       |
+| `textDocument/completion`         | Completes unfinished wikilinks, anchors, and declared frontmatter Address values or keys.                                                                      |
+| `workspace/symbol`                | Finds notes by name, alternate name, ASCII name, shortcode, or Address. Field and project prefixes narrow the saved index. One result appears per source note. |
+| `textDocument/references`         | Finds authored wikilinks, embeds, and declared frontmatter Address values or keys. Ordinary prose is excluded.                                                 |
+| `textDocument/publishDiagnostics` | Reports invalid complete links, embeds, anchors, and declared frontmatter Address targets in open notes.                                                       |
 
 Reference search uses indexed frontmatter to select candidates and reads saved Markdown source for exact ranges and body links. Unsaved edits identify the target under the cursor but do not enter workspace search. The server writes only LSP messages to stdout and uses UTF-16 positions.
 
@@ -37,9 +37,9 @@ An explicitly configured foreign project can be searched even when it is not a d
 
 ### Address completion
 
-Completion inside a `[[...` link searches the selected projects' saved indexes, including when an editor inserts the closing `]]` after the cursor. The query matches anywhere in a note's full name, aliases, shortcode, short Address, or canonical Address. The existing `nameAscii` and `aliasesAscii` fields supply typeable forms of names with non-ASCII characters. The server builds lowercase search keys in memory when it loads an index and transliterates the query with the same rule. The JSONL format carries no separate search field.
+Completion inside a `[[...` link searches the selected projects' saved indexes, including when an editor inserts the closing `]]` after the cursor. The query matches anywhere in a note's full name, alternate names, shortcode, short Address, or canonical Address. The `nameAscii` and `formsAscii` fields supply typeable forms of names with non-ASCII characters. The server builds lowercase search keys in memory when it loads an index and transliterates the query with the same rule. The JSONL format carries no separate search field.
 
-Each result identifies its owning package and canonical Address. Address completion items also carry `data.address` with that canonical Address, `data.display` with the authored name or exactly matched alias, and `data.exact` to distinguish a full name or alias match from a substring match. Editors can use these fields when completing a link's display text without merging targets that share a file or name. Readable `note` content, systemless `none` targets, and game system documents stay selectable even when they share a Markdown file. An ordinary `[[link|text]]` defaults to `note`, while an embedded `![[link|text]]` defaults to `none` and uses `image` as the type of a bare shortcode. Stating a system selects that exact target: `[[macro-autoattack|Text]]` reaches the readable note, and `[[none-macro-autoattack|Text]]` reaches the Macro. An embed offers asset targets and can reach an icon with `![[icon-anvil|Anvil]]`.
+Each result identifies its owning package and canonical Address. Address completion items also carry `data.address` with that canonical Address, `data.display` with the authored name or exactly matched alternate name, and `data.exact` to distinguish a full name or alternate name match from a substring match. Editors can use these fields when completing a link's display text without merging targets that share a file or name. Readable `note` content, systemless `none` targets, and game system documents stay selectable even when they share a Markdown file. An ordinary `[[link|text]]` defaults to `note`, while an embedded `![[link|text]]` defaults to `none` and uses `image` as the type of a bare shortcode. Stating a system selects that exact target: `[[macro-autoattack|Text]]` reaches the readable note, and `[[none-macro-autoattack|Text]]` reaches the Macro. An embed offers asset targets and can reach an icon with `![[icon-anvil|Anvil]]`.
 
 The text edit inserts the shortest Address that parses to the selected target at the cursor. A local game system document can require `sohl-being-bctrncml`, while a target in another package requires a fully qualified Address. A `[[...#` query completes the selected note's `prose` anchors; its events are not offered. Completion in a declared frontmatter Address field uses that field's type and system defaults: image, icon, and folder fields use `none`; other fields use their game system block or `note` outside one. Explicit system segments keep their stated meaning. Input `doc<type>` aliases select readable note records; generated records and completion candidates use the authored type.
 
@@ -59,18 +59,18 @@ An LSP client selects foreign project roots through `initialize`:
 
 The paths name repositories containing their own `package-build.config.yaml`, `.yml`, or `.mjs`. They are editor search configuration, independent of a package's build dependencies. The server validates each foreign project's private index when first used and rebuilds it from saved source if missing or incompatible. A valid complete cache is reusable. An unconfigured cache never adds a project to search. A failed foreign root produces an LSP status message while available projects remain searchable. Save and file-operation notifications refresh the affected project. Clients can update the root list with `workspace/didChangeConfiguration` using `settings.heroiclands.foreignRoots`.
 
-Plain `workspace/symbol` queries search names, aliases, shortcodes, and Addresses in the current project. The query prefixes below narrow matches using saved JSONL records. Searches do not read unsaved frontmatter or scan Markdown files.
+Plain `workspace/symbol` queries search names, alternate names, shortcodes, and Addresses in the current project. The query prefixes below narrow matches using saved JSONL records. Searches do not read unsaved frontmatter or scan Markdown files.
 
-| Query                         | Matches                                                         |
-| ----------------------------- | --------------------------------------------------------------- |
-| `name:alyra`                  | Full names and aliases, including their ASCII forms             |
-| `shortcode:alpha`             | Shortcodes                                                      |
-| `type:lore`                   | Note types                                                      |
-| `tag:myth`                    | Tags                                                            |
-| `all:camel`                   | Ordinary matches in the current and configured foreign projects |
-| `all:type:lore`               | A field filter across those projects                            |
-| `package:thalorna`            | All indexed notes in that configured package                    |
-| `package:thalorna name:camel` | A field filter within that package                              |
+| Query                         | Matches                                                                 |
+| ----------------------------- | ----------------------------------------------------------------------- |
+| `name:alyra`                  | Full names and every language's name forms, including their ASCII forms |
+| `shortcode:alpha`             | Shortcodes                                                              |
+| `type:lore`                   | Note types                                                              |
+| `tag:myth`                    | Tags                                                                    |
+| `all:camel`                   | Ordinary matches in the current and configured foreign projects         |
+| `all:type:lore`               | A field filter across those projects                                    |
+| `package:thalorna`            | All indexed notes in that configured package                            |
+| `package:thalorna name:camel` | A field filter within that package                                      |
 
 `package:` selects the current project or an explicitly configured foreign project by its exact package name. It does not discover other caches or add a build dependency. A missing package or an unknown prefix returns no results. An empty unqualified query lists the current project's notes; an incomplete `name:`, `shortcode:`, `type:`, or `package:` query returns no results. Results name the owning package and open its source note. Package-qualified definitions open a note or asset from its owning root. A bare Address uses the citing project's package default. `textDocument/references` searches the current and configured foreign projects and reports exact saved source ranges.
 

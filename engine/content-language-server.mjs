@@ -21,6 +21,7 @@ import {
 } from "@heroiclands/package-build/engine/pack-config";
 import { noteFile } from "@heroiclands/package-build/engine/index-records";
 import { asciiName } from "@heroiclands/package-build/engine/content-index";
+import { nameFormsOf } from "@heroiclands/package-build/engine/name-forms";
 import { NOTE_VOCABULARY } from "@heroiclands/package-build/engine/note-vocabulary";
 import {
     languageIndexDirectory,
@@ -77,16 +78,26 @@ function noteName(record) {
     return typeof record.name === "string" ? record.name : (record.name?.full ?? record.shortcode);
 }
 
+/** Every alternate name a record lists: its name's language forms and the ASCII forms of each. */
+function alternateNames(record) {
+    return [
+        ...nameFormsOf(record.name),
+        ...Object.values(record.formsAscii ?? {}).flatMap((forms) =>
+            Array.isArray(forms) ? forms : [],
+        ),
+    ];
+}
+
 /** Use the index generator's transliteration for both saved fields and typed queries. */
 function searchKey(value) {
     return typeof value === "string" ? (asciiName(value) ?? "").toLowerCase() : "";
 }
 
-/** Preserve the authored spelling when a query exactly names a note or alias. */
+/** Preserve the authored spelling when a query exactly names a note or another of its names. */
 function completionDisplay(record, query) {
     const full = noteName(record);
     const needle = searchKey(query);
-    const names = [full, ...(record.name?.aliases ?? [])];
+    const names = [full, ...nameFormsOf(record.name)];
     const exact = needle ? names.find((name) => searchKey(name) === needle) : null;
     return { display: exact ?? full, exact: Boolean(exact) };
 }
@@ -342,8 +353,7 @@ export class ContentWorkspace {
                     [
                         noteName(record),
                         record.nameAscii,
-                        ...(record.name?.aliases ?? []),
-                        ...(record.aliasesAscii ?? []),
+                        ...alternateNames(record),
                         record.shortcode,
                         record.address?.slug,
                         record.address?.canonical,
@@ -978,12 +988,7 @@ export class ContentWorkspace {
         const found = new Map();
         for (const record of this.records) {
             if (!record.file?.path) continue;
-            const names = [
-                record.name?.full,
-                record.nameAscii,
-                ...(record.name?.aliases ?? []),
-                ...(record.aliasesAscii ?? []),
-            ];
+            const names = [record.name?.full, record.nameAscii, ...alternateNames(record)];
             const values =
                 field === "tag" ? (record.tags ?? [])
                 : field === "name" ? names
