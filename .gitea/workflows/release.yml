@@ -16,7 +16,7 @@ permissions:
 
 jobs:
     release:
-        uses: HeroicLands/.github/.gitea/workflows/release-npm-package.yml@5d2db91909feba6a8c99013ac15c9a155f066445 # main
+        uses: HeroicLands/.github/.gitea/workflows/release-npm-package.yml@5a31ee2627a7b464710f0942dbfb4c19a4f90f94 # main
         # By name, never `secrets: inherit`.
         secrets:
             RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
